@@ -1,6 +1,8 @@
 #include "rsync_client_simple.h"
 
+#include <chrono>
 #include <fstream>
+#include <thread>
 
 #include <glog/logging.h>
 
@@ -10,6 +12,9 @@
 #include "rsync_service.pb.h"
 
 namespace {
+
+const int kRsyncMetaRetryMax = 60;
+const int kRsyncMetaRetrySleepMs = 1000;
 
 std::string JoinPath(const std::string& base, const std::string& path) {
   if (base.empty()) {
@@ -70,43 +75,50 @@ bool RsyncClientSimple::Fetch() {
 }
 
 bool RsyncClientSimple::FetchMeta(std::vector<std::string>* files) {
-  std::unique_ptr<net::NetCli> cli(net::NewPbCli());
-  cli->set_connect_timeout(timeout_ms_);
-  cli->set_send_timeout(timeout_ms_);
-  cli->set_recv_timeout(timeout_ms_);
-  pstd::Status s = cli->Connect(master_ip_, master_port_ + kPortShiftRsync2, "");
-  if (!s.ok()) {
-    LOG(WARNING) << "rsync2: connect failed " << s.ToString();
-    return false;
-  }
+  for (int attempt = 1; attempt <= kRsyncMetaRetryMax; ++attempt) {
+    std::unique_ptr<net::NetCli> cli(net::NewPbCli());
+    cli->set_connect_timeout(timeout_ms_);
+    cli->set_send_timeout(timeout_ms_);
+    cli->set_recv_timeout(timeout_ms_);
+    pstd::Status s = cli->Connect(master_ip_, master_port_ + kPortShiftRsync2, "");
+    if (!s.ok()) {
+      LOG(WARNING) << "rsync2: connect failed " << s.ToString();
+      std::this_thread::sleep_for(std::chrono::milliseconds(kRsyncMetaRetrySleepMs));
+      continue;
+    }
 
-  RsyncService::RsyncRequest request;
-  request.set_type(RsyncService::kRsyncMeta);
-  request.set_reader_index(0);
-  request.set_db_name(db_name_);
-  request.set_slot_id(0);
+    RsyncService::RsyncRequest request;
+    request.set_type(RsyncService::kRsyncMeta);
+    request.set_reader_index(0);
+    request.set_db_name(db_name_);
+    request.set_slot_id(0);
 
-  s = cli->Send(&request);
-  if (!s.ok()) {
-    LOG(WARNING) << "rsync2: send meta request failed " << s.ToString();
+    s = cli->Send(&request);
+    if (!s.ok()) {
+      LOG(WARNING) << "rsync2: send meta request failed " << s.ToString();
+      cli->Close();
+      std::this_thread::sleep_for(std::chrono::milliseconds(kRsyncMetaRetrySleepMs));
+      continue;
+    }
+
+    RsyncService::RsyncResponse response;
+    s = cli->Recv(&response);
     cli->Close();
-    return false;
+    if (!s.ok()) {
+      LOG(WARNING) << "rsync2: recv meta response failed " << s.ToString();
+      std::this_thread::sleep_for(std::chrono::milliseconds(kRsyncMetaRetrySleepMs));
+      continue;
+    }
+    if (response.code() != RsyncService::kOk || !response.has_meta_resp()) {
+      LOG(WARNING) << "rsync2: meta response error (attempt " << attempt << "/" << kRsyncMetaRetryMax << ")";
+      std::this_thread::sleep_for(std::chrono::milliseconds(kRsyncMetaRetrySleepMs));
+      continue;
+    }
+    snapshot_uuid_ = response.snapshot_uuid();
+    files->assign(response.meta_resp().filenames().begin(), response.meta_resp().filenames().end());
+    return true;
   }
-
-  RsyncService::RsyncResponse response;
-  s = cli->Recv(&response);
-  cli->Close();
-  if (!s.ok()) {
-    LOG(WARNING) << "rsync2: recv meta response failed " << s.ToString();
-    return false;
-  }
-  if (response.code() != RsyncService::kOk || !response.has_meta_resp()) {
-    LOG(WARNING) << "rsync2: meta response error";
-    return false;
-  }
-  snapshot_uuid_ = response.snapshot_uuid();
-  files->assign(response.meta_resp().filenames().begin(), response.meta_resp().filenames().end());
-  return true;
+  return false;
 }
 
 bool RsyncClientSimple::EnsureParentDir(const std::string& file_path) {
@@ -114,7 +126,19 @@ bool RsyncClientSimple::EnsureParentDir(const std::string& file_path) {
   if (dir.empty()) {
     return true;
   }
-  return pstd::CreatePath(dir) == 0;
+  int dir_state = pstd::IsDir(dir);
+  if (dir_state == 0) {
+    return true;
+  }
+  if (dir_state == 1) {
+    LOG(WARNING) << "rsync2: path exists but is file " << dir;
+    return false;
+  }
+  if (pstd::CreatePath(dir) != 0) {
+    LOG(WARNING) << "rsync2: failed to create path " << dir;
+    return false;
+  }
+  return true;
 }
 
 bool RsyncClientSimple::FetchFile(const std::string& filename) {
@@ -130,7 +154,6 @@ bool RsyncClientSimple::FetchFile(const std::string& filename) {
 
   std::string local_path = JoinPath(dump_path_, filename);
   if (!EnsureParentDir(local_path)) {
-    LOG(WARNING) << "rsync2: failed to create path " << local_path;
     cli->Close();
     return false;
   }
