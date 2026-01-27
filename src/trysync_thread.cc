@@ -429,7 +429,9 @@ void* TrysyncThread::ThreadMain() {
     int rsync_port = g_conf.local_port + 3000;
     auto s = kDBSyncModule;
     s.append("_" + ip_port);
-    int ret = pstd::StartRsync(dbsync_path, s, lip, rsync_port, g_conf.passwd);
+    // Use PikiwiDB default rsync auth when master has no auth configured.
+    const std::string rsync_passwd = g_conf.passwd.empty() ? "default" : g_conf.passwd;
+    int ret = pstd::StartRsync(dbsync_path, s, lip, rsync_port, rsync_passwd);
     if (0 != ret) {
       LOG(WARNING) << "Failed to start rsync, path: " << dbsync_path << ", error: " << ret;
     }
