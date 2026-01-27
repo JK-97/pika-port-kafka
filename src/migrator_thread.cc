@@ -50,30 +50,20 @@ struct HasTTLTwoArg<
         std::declval<storage::Slice>(),
         static_cast<std::map<storage::DataType, storage::Status>*>(nullptr)))>> : std::true_type {};
 
-int64_t GetTTLCompatImpl(storage::Storage* db,
-                         const std::string& key,
-                         storage::DataType type,
-                         std::true_type /*has_two_args*/) {
-  std::map<storage::DataType, storage::Status> type_status;
-  std::map<storage::DataType, int64_t> ttl_map = db->TTL(storage::Slice(key), &type_status);
-  auto it = ttl_map.find(type);
-  if (it != ttl_map.end()) {
-    return it->second;
-  }
-  return -1;
-}
-
-int64_t GetTTLCompatImpl(storage::Storage* db,
-                         const std::string& key,
-                         storage::DataType /*type*/,
-                         std::false_type /*has_two_args*/) {
-  return db->TTL(storage::Slice(key));
-}
-
-int64_t GetTTLCompat(storage::Storage* db, const std::string& key, storage::DataType type) {
-  static_assert(HasTTLOneArg<storage::Storage>::value || HasTTLTwoArg<storage::Storage>::value,
+template <typename StorageT>
+int64_t GetTTLCompat(StorageT* db, const std::string& key, storage::DataType type) {
+  static_assert(HasTTLOneArg<StorageT>::value || HasTTLTwoArg<StorageT>::value,
                 "storage::Storage::TTL signature not detected");
-  return GetTTLCompatImpl(db, key, type, HasTTLTwoArg<storage::Storage>{});
+  if constexpr (HasTTLTwoArg<StorageT>::value) {
+    std::map<storage::DataType, storage::Status> type_status;
+    std::map<storage::DataType, int64_t> ttl_map = db->TTL(storage::Slice(key), &type_status);
+    auto it = ttl_map.find(type);
+    if (it != ttl_map.end()) {
+      return it->second;
+    }
+    return -1;
+  }
+  return db->TTL(storage::Slice(key));
 }
 
 std::string DataTypeName(int type) {
