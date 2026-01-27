@@ -37,8 +37,8 @@ template <typename T, typename = void>
 struct HasTTLOneArg : std::false_type {};
 
 template <typename T>
-struct HasTTLOneArg<T, std::void_t<decltype(std::declval<T>().TTL(std::declval<storage::Slice>()))>>
-    : std::true_type {};
+struct HasTTLOneArg<T, std::void_t<decltype(static_cast<int64_t (T::*)(const storage::Slice&)>(
+                               &T::TTL))>> : std::true_type {};
 
 template <typename T, typename = void>
 struct HasTTLTwoArg : std::false_type {};
@@ -46,14 +46,12 @@ struct HasTTLTwoArg : std::false_type {};
 template <typename T>
 struct HasTTLTwoArg<
     T,
-    std::void_t<decltype(std::declval<T>().TTL(
-        std::declval<storage::Slice>(),
-        static_cast<std::map<storage::DataType, storage::Status>*>(nullptr)))>> : std::true_type {};
+    std::void_t<decltype(static_cast<std::map<storage::DataType, int64_t> (T::*)(
+                               const storage::Slice&, std::map<storage::DataType, storage::Status>*)>(
+        &T::TTL))>> : std::true_type {};
 
 template <typename StorageT>
 int64_t GetTTLCompat(StorageT* db, const std::string& key, storage::DataType type) {
-  static_assert(HasTTLOneArg<StorageT>::value || HasTTLTwoArg<StorageT>::value,
-                "storage::Storage::TTL signature not detected");
   if constexpr (HasTTLTwoArg<StorageT>::value) {
     std::map<storage::DataType, storage::Status> type_status;
     std::map<storage::DataType, int64_t> ttl_map = db->TTL(storage::Slice(key), &type_status);
@@ -63,7 +61,12 @@ int64_t GetTTLCompat(StorageT* db, const std::string& key, storage::DataType typ
     }
     return -1;
   }
-  return db->TTL(storage::Slice(key));
+  if constexpr (HasTTLOneArg<StorageT>::value) {
+    return db->TTL(storage::Slice(key));
+  }
+  static_assert(HasTTLOneArg<StorageT>::value || HasTTLTwoArg<StorageT>::value,
+                "storage::Storage::TTL signature not detected");
+  return -1;
 }
 
 std::string DataTypeName(int type) {
