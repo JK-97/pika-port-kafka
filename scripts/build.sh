@@ -9,6 +9,8 @@ Options:
   --pikiwidb-root PATH    PikiwiDB source root
   --pikiwidb-build PATH   PikiwiDB build dir (contains build/src/...)
   --pikiwidb-deps PATH    PikiwiDB deps dir (contains deps/include deps/lib)
+  --unwind-lib PATH       libunwind.so path (optional)
+  --unwind-x86-64-lib PATH libunwind-x86_64.so path (optional)
   --bz2-lib PATH          libbz2.so path (optional)
   --build-dir PATH        This repo build dir (default: ./build)
   --src-dir PATH          This repo source dir (default: ./src)
@@ -39,12 +41,31 @@ detect_bz2() {
   echo "$path"
 }
 
+detect_unwind() {
+  local name="$1"
+  local path=""
+  if command -v ldconfig >/dev/null 2>&1; then
+    path="$(ldconfig -p | awk -v n="$name" '$1 == n {print $NF; exit}')"
+  fi
+  if [[ -z "$path" ]]; then
+    for p in /lib*/"$name" /usr/lib*/"$name"; do
+      if [[ -e "$p" ]]; then
+        path="$p"
+        break
+      fi
+    done
+  fi
+  echo "$path"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PIKIWIDB_ROOT="${PIKIWIDB_ROOT:-}"
 PIKIWIDB_BUILD="${PIKIWIDB_BUILD:-}"
 PIKIWIDB_DEPS="${PIKIWIDB_DEPS:-}"
+UNWIND_LIBRARY="${UNWIND_LIBRARY:-}"
+UNWIND_X86_64_LIBRARY="${UNWIND_X86_64_LIBRARY:-}"
 BZ2_LIBRARY="${BZ2_LIBRARY:-}"
 BUILD_DIR="${REPO_ROOT}/build"
 SRC_DIR="${REPO_ROOT}/src"
@@ -56,6 +77,8 @@ while [[ $# -gt 0 ]]; do
     --pikiwidb-root) PIKIWIDB_ROOT="$2"; shift 2 ;;
     --pikiwidb-build) PIKIWIDB_BUILD="$2"; shift 2 ;;
     --pikiwidb-deps) PIKIWIDB_DEPS="$2"; shift 2 ;;
+    --unwind-lib) UNWIND_LIBRARY="$2"; shift 2 ;;
+    --unwind-x86-64-lib) UNWIND_X86_64_LIBRARY="$2"; shift 2 ;;
     --bz2-lib) BZ2_LIBRARY="$2"; shift 2 ;;
     --build-dir) BUILD_DIR="$2"; shift 2 ;;
     --src-dir) SRC_DIR="$2"; shift 2 ;;
@@ -90,6 +113,13 @@ if [[ -z "$BZ2_LIBRARY" ]]; then
   BZ2_LIBRARY="$(detect_bz2)"
 fi
 [[ -n "$BZ2_LIBRARY" ]] || die "libbz2.so not found; use --bz2-lib to set a path"
+
+if [[ -z "$UNWIND_LIBRARY" ]]; then
+  UNWIND_LIBRARY="$(detect_unwind libunwind.so)"
+fi
+if [[ -z "$UNWIND_X86_64_LIBRARY" ]]; then
+  UNWIND_X86_64_LIBRARY="$(detect_unwind libunwind-x86_64.so)"
+fi
 
 if [[ -z "$JOBS" ]]; then
   if command -v nproc >/dev/null 2>&1; then
@@ -136,6 +166,8 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
   -DZSTD_LIBRARY="${DEPS_LIB}/libzstd.a" \
   -DFMT_LIBRARY="${DEPS_LIB}/libfmt.a" \
   -DJEMALLOC_LIBRARY="${DEPS_LIB}/libjemalloc.a" \
-  -DBZ2_LIBRARY="$BZ2_LIBRARY"
+  -DBZ2_LIBRARY="$BZ2_LIBRARY" \
+  ${UNWIND_LIBRARY:+-DUNWIND_LIBRARY="$UNWIND_LIBRARY"} \
+  ${UNWIND_X86_64_LIBRARY:+-DUNWIND_X86_64_LIBRARY="$UNWIND_X86_64_LIBRARY"}
 
 cmake --build "$BUILD_DIR" -j"$JOBS"

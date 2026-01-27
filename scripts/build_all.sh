@@ -11,6 +11,8 @@ Options:
   --pikiwidb-root PATH    PikiwiDB source root
   --pikiwidb-build PATH   PikiwiDB build dir (default: <root>/build)
   --pikiwidb-deps PATH    PikiwiDB deps dir (default: <root>/deps)
+  --unwind-lib PATH       libunwind.so path (optional)
+  --unwind-x86-64-lib PATH libunwind-x86_64.so path (optional)
   --pikiwidb-repo URL     PikiwiDB repo URL (default: official repo)
   --pikiwidb-ref REF      PikiwiDB tag/branch/commit (default: v3.5.6)
   --clone                 Clone if root does not exist
@@ -35,6 +37,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PIKIWIDB_ROOT="${PIKIWIDB_ROOT:-}"
 PIKIWIDB_BUILD="${PIKIWIDB_BUILD:-}"
 PIKIWIDB_DEPS="${PIKIWIDB_DEPS:-}"
+UNWIND_LIBRARY="${UNWIND_LIBRARY:-}"
+UNWIND_X86_64_LIBRARY="${UNWIND_X86_64_LIBRARY:-}"
 PIKIWIDB_REPO="https://github.com/OpenAtomFoundation/pikiwidb.git"
 PIKIWIDB_REF="v3.5.6"
 BUILD_DIR="${REPO_ROOT}/build"
@@ -50,6 +54,8 @@ while [[ $# -gt 0 ]]; do
     --pikiwidb-root) PIKIWIDB_ROOT="$2"; shift 2 ;;
     --pikiwidb-build) PIKIWIDB_BUILD="$2"; shift 2 ;;
     --pikiwidb-deps) PIKIWIDB_DEPS="$2"; shift 2 ;;
+    --unwind-lib) UNWIND_LIBRARY="$2"; shift 2 ;;
+    --unwind-x86-64-lib) UNWIND_X86_64_LIBRARY="$2"; shift 2 ;;
     --pikiwidb-repo) PIKIWIDB_REPO="$2"; shift 2 ;;
     --pikiwidb-ref) PIKIWIDB_REF="$2"; shift 2 ;;
     --clone) CLONE=1; shift ;;
@@ -126,4 +132,6 @@ cmake --build "$PIKIWIDB_BUILD" --target pstd net storage -j"$JOBS"
   --pikiwidb-deps "$PIKIWIDB_DEPS" \
   --build-dir "$BUILD_DIR" \
   --src-dir "$SRC_DIR" \
-  --jobs "$JOBS"
+  --jobs "$JOBS" \
+  ${UNWIND_LIBRARY:+--unwind-lib "$UNWIND_LIBRARY"} \
+  ${UNWIND_X86_64_LIBRARY:+--unwind-x86-64-lib "$UNWIND_X86_64_LIBRARY"}

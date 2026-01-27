@@ -134,3 +134,5 @@ ldconfig -p | rg libbz2
 
 - `cannot find -lrdkafka`：安装 `librdkafka` 开发包，或设置 `LIBRARY_PATH` 指向库目录。
 - `undefined reference` to fmt/jemalloc/rocksdb：确认 CMake 参数中的 `*_LIBRARY` 指向真实文件。
+- `undefined reference` to `_Ux86_64_getcontext` / `_ULx86_64_*`：安装 `libunwind-dev` 并清理构建缓存，
+  或显式传入 `--unwind-lib` / `--unwind-x86-64-lib`。
