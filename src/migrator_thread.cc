@@ -6,6 +6,8 @@
 
 #include <glog/logging.h>
 #include <functional>
+#include <map>
+#include <type_traits>
 #include <vector>
 
 #include "net/include/redis_cli.h"
@@ -29,6 +31,49 @@ int64_t ScanBatchCount() {
 
 bool ShouldSkipKey(const std::string& key) {
   return key.compare(0, SlotKeyPrefix.size(), SlotKeyPrefix) == 0;
+}
+
+template <typename T, typename = void>
+struct HasTTLOneArg : std::false_type {};
+
+template <typename T>
+struct HasTTLOneArg<T, std::void_t<decltype(std::declval<T>().TTL(std::declval<storage::Slice>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasTTLTwoArg : std::false_type {};
+
+template <typename T>
+struct HasTTLTwoArg<
+    T,
+    std::void_t<decltype(std::declval<T>().TTL(
+        std::declval<storage::Slice>(),
+        static_cast<std::map<storage::DataType, storage::Status>*>(nullptr)))>> : std::true_type {};
+
+int64_t GetTTLCompatImpl(storage::Storage* db,
+                         const std::string& key,
+                         storage::DataType type,
+                         std::true_type /*has_two_args*/) {
+  std::map<storage::DataType, storage::Status> type_status;
+  std::map<storage::DataType, int64_t> ttl_map = db->TTL(storage::Slice(key), &type_status);
+  auto it = ttl_map.find(type);
+  if (it != ttl_map.end()) {
+    return it->second;
+  }
+  return -1;
+}
+
+int64_t GetTTLCompatImpl(storage::Storage* db,
+                         const std::string& key,
+                         storage::DataType /*type*/,
+                         std::false_type /*has_two_args*/) {
+  return db->TTL(storage::Slice(key));
+}
+
+int64_t GetTTLCompat(storage::Storage* db, const std::string& key, storage::DataType type) {
+  static_assert(HasTTLOneArg<storage::Storage>::value || HasTTLTwoArg<storage::Storage>::value,
+                "storage::Storage::TTL signature not detected");
+  return GetTTLCompatImpl(db, key, type, HasTTLTwoArg<storage::Storage>{});
 }
 
 std::string DataTypeName(int type) {
@@ -99,7 +144,7 @@ void MigratorThread::MigrateStringsDB() {
       argv.push_back("SET");
       argv.push_back(k);
       argv.push_back(value);
-      int64_t ttl = db->TTL(k);
+      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kStrings);
       if (ttl > 0) {
         argv.push_back("EX");
         argv.push_back(std::to_string(ttl));
@@ -164,7 +209,7 @@ void MigratorThread::MigrateListsDB() {
         }
       }
 
-      int64_t ttl = db->TTL(k);
+      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kLists);
       if (ttl > 0) {
         net::RedisCmdArgsType argv;
         std::string cmd;
@@ -224,7 +269,7 @@ void MigratorThread::MigrateHashesDB() {
         DispatchRecord(record);
       }
 
-      int64_t ttl = db->TTL(k);
+      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kHashes);
       if (ttl > 0) {
         net::RedisCmdArgsType argv;
         std::string cmd;
@@ -282,7 +327,7 @@ void MigratorThread::MigrateSetsDB() {
         DispatchRecord(record);
       }
 
-      int64_t ttl = db->TTL(k);
+      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kSets);
       if (ttl > 0) {
         net::RedisCmdArgsType argv;
         std::string cmd;
@@ -354,7 +399,7 @@ void MigratorThread::MigrateZsetsDB() {
         }
       }
 
-      int64_t ttl = db->TTL(k);
+      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kZSets);
       if (ttl > 0) {
         net::RedisCmdArgsType argv;
         std::string cmd;
