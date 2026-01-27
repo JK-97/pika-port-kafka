@@ -1,0 +1,63 @@
+#ifndef MIGRATOR_THREAD_H_
+#define MIGRATOR_THREAD_H_
+
+#include <iostream>
+
+#include "conf.h"
+#include "kafka_sender.h"
+
+namespace storage {
+class Storage;
+}
+
+class MigratorThread : public net::Thread {
+ public:
+  MigratorThread(storage::Storage* db, std::vector<KafkaSender*>* senders, int type, int thread_num)
+      : db_(db),
+        should_exit_(false),
+        senders_(senders),
+        type_(type),
+        thread_num_(thread_num),
+        thread_index_(0),
+        num_(0) {}
+
+  virtual ~MigratorThread();
+
+  int64_t num() {
+    std::lock_guard l(num_mutex_);
+    return num_;
+  }
+
+  void Stop() { should_exit_ = true; }
+
+ private:
+  void PlusNum() {
+    std::lock_guard l(num_mutex_);
+    ++num_;
+  }
+
+  void DispatchRecord(const KafkaRecord& record);
+
+  void MigrateDB();
+  void MigrateStringsDB();
+  void MigrateListsDB();
+  void MigrateHashesDB();
+  void MigrateSetsDB();
+  void MigrateZsetsDB();
+
+  virtual void* ThreadMain();
+
+ private:
+  storage::Storage* db_;
+  bool should_exit_;
+
+  std::vector<KafkaSender*>* senders_;
+  int type_;
+  int thread_num_;
+ int thread_index_;
+
+ int64_t num_;
+ pstd::Mutex num_mutex_;
+};
+
+#endif
