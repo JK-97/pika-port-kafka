@@ -8,6 +8,8 @@ set(CXXFLAGS "-O2 -pipe -fPIC -W -DNDEBUG -Wwrite-strings -Wpointer-arith \
 set(PIKIWIDB_ROOT "" CACHE PATH "Path to pikiwidb source root")
 set(PIKIWIDB_BUILD "" CACHE PATH "Path to pikiwidb build dir")
 set(PIKIWIDB_DEPS "" CACHE PATH "Path to pikiwidb deps dir (contains include/lib)")
+set(UNWIND_LIBRARY "" CACHE FILEPATH "Path to libunwind")
+set(UNWIND_X86_64_LIBRARY "" CACHE FILEPATH "Path to libunwind-x86_64")
 
 set(SRC_DIR .)
 aux_source_directory(${SRC_DIR} BASE_OBJS)
@@ -39,11 +41,27 @@ if(PIKIWIDB_BUILD)
   )
 endif()
 
+if(NOT UNWIND_LIBRARY)
+  find_library(UNWIND_LIBRARY unwind)
+endif()
+if(NOT UNWIND_X86_64_LIBRARY)
+  find_library(UNWIND_X86_64_LIBRARY unwind-x86_64)
+endif()
+
+set(EXTRA_UNWIND_LIBS "")
+if(UNWIND_LIBRARY AND NOT UNWIND_LIBRARY MATCHES "NOTFOUND")
+  list(APPEND EXTRA_UNWIND_LIBS ${UNWIND_LIBRARY})
+endif()
+if(UNWIND_X86_64_LIBRARY AND NOT UNWIND_X86_64_LIBRARY MATCHES "NOTFOUND")
+  list(APPEND EXTRA_UNWIND_LIBS ${UNWIND_X86_64_LIBRARY})
+endif()
+
 target_link_libraries(pika_port
                                 storage pstd net
                                 ${ROCKSDB_LIBRARY} ${SNAPPY_LIBRARY} ${ZSTD_LIBRARY} ${LZ4_LIBRARY}
                                 ${ZLIB_LIBRARY} ${BZ2_LIBRARY} ${JEMALLOC_LIBRARY}
                                 ${GLOG_LIBRARY} ${GFLAGS_LIBRARY} ${FMT_LIBRARY}
+                                ${EXTRA_UNWIND_LIBS}
                                 pthread rdkafka)
 set_target_properties(pika_port PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
