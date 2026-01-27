@@ -15,6 +15,7 @@
 #include "const.h"
 #include "master_conn.h"
 #include "pika_port.h"
+#include "resp_parser.h"
 
 extern PikaPort* g_pika_port;
 
@@ -82,90 +83,6 @@ net::ReadStatus MasterConn::ReadBody(uint32_t body_length) {
   return net::kReadAll;
 }
 
-int32_t MasterConn::FindNextSeparators(const std::string& content, int32_t pos) {
-  int32_t length = content.size();
-  if (pos >= length) {
-    return -1;
-  }
-  while (pos < length) {
-    if (content[pos] == '\n') {
-      return pos;
-    }
-    pos++;
-  }
-  return -1;
-}
-
-int32_t MasterConn::GetNextNum(const std::string& content, int32_t left_pos, int32_t right_pos, long* value) {
-  //  left_pos        right_pos
-  //      |------   -------|
-  //            |   |
-  //            *3\r\n
-  //            012 3
-  // num range [left_pos + 1, right_pos - 2]
-  assert(left_pos < right_pos);
-  if (pstd::string2int(content.data() + left_pos + 1, right_pos - left_pos - 2, value) != 0) {
-    return 0;
-  }
-  return -1;
-}
-
-// RedisRESPArray : *3\r\n$3\r\nset\r\n$3\r\nkey\r\n$5\r\nvalue\r\n
-net::ReadStatus MasterConn::ParseRedisRESPArray(const std::string& content, net::RedisCmdArgsType* argv) {
-  int32_t pos = 0;
-  int32_t next_parse_pos = 0;
-  int32_t content_len = content.size();
-  long multibulk_len = 0;
-  long bulk_len = 0;
-  if (content.empty() || content[0] != '*') {
-    LOG(INFO) << "Content empty() or the first character of the redis protocol string not equal '*'";
-    return net::kParseError;
-  }
-  pos = FindNextSeparators(content, next_parse_pos);
-  if (pos != -1 && GetNextNum(content, next_parse_pos, pos, &multibulk_len) != -1) {
-    next_parse_pos = pos + 1;
-  } else {
-    LOG(INFO) << "Find next separators error or get next num error";
-    return net::kParseError;
-  }
-
-  // next_parst_pos          pos
-  //        |-------   -------|
-  //               |   |
-  //               $3\r\nset\r\n
-  //               012 3 4567 8
-
-  argv->clear();
-  while (multibulk_len != 0) {
-    if (content[next_parse_pos] != '$') {
-      LOG(INFO) << "The first charactor of the RESP type element not equal '$'";
-      return net::kParseError;
-    }
-
-    bulk_len = -1;
-    pos = FindNextSeparators(content, next_parse_pos);
-    if (pos != -1 && GetNextNum(content, next_parse_pos, pos, &bulk_len) != -1) {
-      if (pos + 1 + bulk_len + 2 > content_len) {
-        return net::kParseError;
-      } else {
-        next_parse_pos = pos + 1;
-        argv->emplace_back(content.data() + next_parse_pos, bulk_len);
-        next_parse_pos = next_parse_pos + bulk_len + 2;
-        multibulk_len--;
-      }
-    } else {
-      LOG(INFO) << "Find next separators error or get next num error";
-      return net::kParseError;
-    }
-  }
-  if (content_len != next_parse_pos) {
-    LOG(INFO) << "Incomplete parse";
-    return net::kParseError;
-  } else {
-    return net::kOk;
-  }
-}
-
 void MasterConn::ResetStatus() {
   rbuf_len_ = 0;
   rbuf_cur_pos_ = 0;
@@ -209,9 +126,9 @@ net::ReadStatus MasterConn::GetRequest() {
   net::RedisCmdArgsType argv;
   std::string body(rbuf_ + HEADER_LEN, body_length);
   if (type == kTypePortAuth) {
-    if ((status = ParseRedisRESPArray(body, &argv)) != net::kOk) {
+    if (ParseRedisRESPArray(body, &argv) != kRespOk) {
       LOG(INFO) << "Type auth ParseRedisRESPArray error";
-      return status;
+      return net::kParseError;
     }
     if (!ProcessAuth(argv)) {
       return net::kDealError;
@@ -222,9 +139,9 @@ net::ReadStatus MasterConn::GetRequest() {
       LOG(INFO) << "Binlog decode error: " << item.ToString();
       return net::kParseError;
     }
-    if ((status = ParseRedisRESPArray(item.content(), &argv)) != net::kOk) {
+    if (ParseRedisRESPArray(item.content(), &argv) != kRespOk) {
       LOG(INFO) << "Type Binlog ParseRedisRESPArray error: " << item.ToString();
-      return status;
+      return net::kParseError;
     }
     if (!ProcessBinlogData(argv, item)) {
       return net::kDealError;

@@ -14,6 +14,7 @@ struct Checkpoint {
   uint64_t offset{0};
   uint64_t logic_id{0};
   uint32_t server_id{0};
+  uint32_t term_id{0};
   uint64_t ts_ms{0};
 };
 
@@ -22,6 +23,7 @@ class CheckpointManager {
   CheckpointManager(std::string path, std::string source_id, std::string offsets_topic, std::string brokers);
 
   bool Load(Checkpoint* out);
+  bool GetLast(Checkpoint* out) const;
   void SetBinlog(Binlog* binlog);
   void OnAck(rd_kafka_t* producer, const Checkpoint& cp);
 

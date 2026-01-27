@@ -11,6 +11,8 @@ Options:
   --pikiwidb-deps PATH    PikiwiDB deps dir (contains deps/include deps/lib)
   --unwind-lib PATH       libunwind.so path (optional)
   --unwind-x86-64-lib PATH libunwind-x86_64.so path (optional)
+  --protobuf-lib PATH     libprotobuf.a path (optional)
+  --protobuf-protoc PATH  protoc path (optional)
   --bz2-lib PATH          libbz2.so path (optional)
   --build-dir PATH        This repo build dir (default: ./build)
   --src-dir PATH          This repo source dir (default: ./src)
@@ -66,6 +68,8 @@ PIKIWIDB_BUILD="${PIKIWIDB_BUILD:-}"
 PIKIWIDB_DEPS="${PIKIWIDB_DEPS:-}"
 UNWIND_LIBRARY="${UNWIND_LIBRARY:-}"
 UNWIND_X86_64_LIBRARY="${UNWIND_X86_64_LIBRARY:-}"
+PROTOBUF_LIBRARY="${PROTOBUF_LIBRARY:-}"
+PROTOBUF_PROTOC="${PROTOBUF_PROTOC:-}"
 BZ2_LIBRARY="${BZ2_LIBRARY:-}"
 BUILD_DIR="${REPO_ROOT}/build"
 SRC_DIR="${REPO_ROOT}/src"
@@ -79,6 +83,8 @@ while [[ $# -gt 0 ]]; do
     --pikiwidb-deps) PIKIWIDB_DEPS="$2"; shift 2 ;;
     --unwind-lib) UNWIND_LIBRARY="$2"; shift 2 ;;
     --unwind-x86-64-lib) UNWIND_X86_64_LIBRARY="$2"; shift 2 ;;
+    --protobuf-lib) PROTOBUF_LIBRARY="$2"; shift 2 ;;
+    --protobuf-protoc) PROTOBUF_PROTOC="$2"; shift 2 ;;
     --bz2-lib) BZ2_LIBRARY="$2"; shift 2 ;;
     --build-dir) BUILD_DIR="$2"; shift 2 ;;
     --src-dir) SRC_DIR="$2"; shift 2 ;;
@@ -148,6 +154,12 @@ require_lib "${DEPS_LIB}/liblz4.a"
 require_lib "${DEPS_LIB}/libzstd.a"
 require_lib "${DEPS_LIB}/libfmt.a"
 require_lib "${DEPS_LIB}/libjemalloc.a"
+if [[ -z "$PROTOBUF_LIBRARY" && -f "${DEPS_LIB}/libprotobuf.a" ]]; then
+  PROTOBUF_LIBRARY="${DEPS_LIB}/libprotobuf.a"
+fi
+if [[ -z "$PROTOBUF_PROTOC" && -x "${PIKIWIDB_DEPS}/bin/protoc" ]]; then
+  PROTOBUF_PROTOC="${PIKIWIDB_DEPS}/bin/protoc"
+fi
 
 if [[ "$CLEAN" -eq 1 ]]; then
   rm -rf "$BUILD_DIR"
@@ -168,6 +180,8 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
   -DJEMALLOC_LIBRARY="${DEPS_LIB}/libjemalloc.a" \
   -DBZ2_LIBRARY="$BZ2_LIBRARY" \
   ${UNWIND_LIBRARY:+-DUNWIND_LIBRARY="$UNWIND_LIBRARY"} \
-  ${UNWIND_X86_64_LIBRARY:+-DUNWIND_X86_64_LIBRARY="$UNWIND_X86_64_LIBRARY"}
+  ${UNWIND_X86_64_LIBRARY:+-DUNWIND_X86_64_LIBRARY="$UNWIND_X86_64_LIBRARY"} \
+  ${PROTOBUF_LIBRARY:+-DPROTOBUF_LIBRARY="$PROTOBUF_LIBRARY"} \
+  ${PROTOBUF_PROTOC:+-DPROTOBUF_PROTOC="$PROTOBUF_PROTOC"}
 
 cmake --build "$BUILD_DIR" -j"$JOBS"

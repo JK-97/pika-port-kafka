@@ -36,10 +36,6 @@ class MasterConn : public net::NetConn {
   net::ReadStatus ReadBody(uint32_t body_length);
   void ResetStatus();
 
-  int32_t FindNextSeparators(const std::string& content, int32_t next_parse_pos);
-  int32_t GetNextNum(const std::string& content, int32_t left_pos, int32_t pos, long* value);
-  net::ReadStatus ParseRedisRESPArray(const std::string& content, net::RedisCmdArgsType* argv);
-
   bool ProcessAuth(const net::RedisCmdArgsType& argv);
   bool ProcessBinlogData(const net::RedisCmdArgsType& argv, const PortBinlogItem& binlog_item);
 

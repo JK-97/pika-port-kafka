@@ -13,6 +13,8 @@ Options:
   --pikiwidb-deps PATH    PikiwiDB deps dir (default: <root>/deps)
   --unwind-lib PATH       libunwind.so path (optional)
   --unwind-x86-64-lib PATH libunwind-x86_64.so path (optional)
+  --protobuf-lib PATH     libprotobuf.a path (optional)
+  --protobuf-protoc PATH  protoc path (optional)
   --pikiwidb-repo URL     PikiwiDB repo URL (default: official repo)
   --pikiwidb-ref REF      PikiwiDB tag/branch/commit (default: v3.5.6)
   --clone                 Clone if root does not exist
@@ -39,6 +41,8 @@ PIKIWIDB_BUILD="${PIKIWIDB_BUILD:-}"
 PIKIWIDB_DEPS="${PIKIWIDB_DEPS:-}"
 UNWIND_LIBRARY="${UNWIND_LIBRARY:-}"
 UNWIND_X86_64_LIBRARY="${UNWIND_X86_64_LIBRARY:-}"
+PROTOBUF_LIBRARY="${PROTOBUF_LIBRARY:-}"
+PROTOBUF_PROTOC="${PROTOBUF_PROTOC:-}"
 PIKIWIDB_REPO="https://github.com/OpenAtomFoundation/pikiwidb.git"
 PIKIWIDB_REF="v3.5.6"
 BUILD_DIR="${REPO_ROOT}/build"
@@ -56,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     --pikiwidb-deps) PIKIWIDB_DEPS="$2"; shift 2 ;;
     --unwind-lib) UNWIND_LIBRARY="$2"; shift 2 ;;
     --unwind-x86-64-lib) UNWIND_X86_64_LIBRARY="$2"; shift 2 ;;
+    --protobuf-lib) PROTOBUF_LIBRARY="$2"; shift 2 ;;
+    --protobuf-protoc) PROTOBUF_PROTOC="$2"; shift 2 ;;
     --pikiwidb-repo) PIKIWIDB_REPO="$2"; shift 2 ;;
     --pikiwidb-ref) PIKIWIDB_REF="$2"; shift 2 ;;
     --clone) CLONE=1; shift ;;
@@ -134,4 +140,6 @@ cmake --build "$PIKIWIDB_BUILD" --target pstd net storage -j"$JOBS"
   --src-dir "$SRC_DIR" \
   --jobs "$JOBS" \
   ${UNWIND_LIBRARY:+--unwind-lib "$UNWIND_LIBRARY"} \
-  ${UNWIND_X86_64_LIBRARY:+--unwind-x86-64-lib "$UNWIND_X86_64_LIBRARY"}
+  ${UNWIND_X86_64_LIBRARY:+--unwind-x86-64-lib "$UNWIND_X86_64_LIBRARY"} \
+  ${PROTOBUF_LIBRARY:+--protobuf-lib "$PROTOBUF_LIBRARY"} \
+  ${PROTOBUF_PROTOC:+--protobuf-protoc "$PROTOBUF_PROTOC"}

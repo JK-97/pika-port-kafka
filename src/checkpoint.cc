@@ -26,6 +26,15 @@ bool CheckpointManager::Load(Checkpoint* out) {
   return false;
 }
 
+bool CheckpointManager::GetLast(Checkpoint* out) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!has_last_) {
+    return false;
+  }
+  *out = last_;
+  return true;
+}
+
 void CheckpointManager::SetBinlog(Binlog* binlog) {
   std::lock_guard<std::mutex> lock(mutex_);
   binlog_ = binlog;
@@ -166,6 +175,7 @@ std::string CheckpointManager::CheckpointToJson(const Checkpoint& cp) const {
   ss << ",\"offset\":" << cp.offset;
   ss << ",\"logic_id\":" << cp.logic_id;
   ss << ",\"server_id\":" << cp.server_id;
+  ss << ",\"term_id\":" << cp.term_id;
   ss << ",\"ts_ms\":" << cp.ts_ms;
   ss << "}";
   return ss.str();
@@ -221,6 +231,7 @@ bool CheckpointManager::ParseCheckpointJson(const std::string& json, Checkpoint*
   uint64_t offset = 0;
   uint64_t logic_id = 0;
   uint64_t server_id = 0;
+  uint64_t term_id = 0;
   uint64_t ts_ms = 0;
   if (!find_number("filenum", &filenum)) {
     return false;
@@ -230,12 +241,14 @@ bool CheckpointManager::ParseCheckpointJson(const std::string& json, Checkpoint*
   }
   find_number("logic_id", &logic_id);
   find_number("server_id", &server_id);
+  find_number("term_id", &term_id);
   find_number("ts_ms", &ts_ms);
 
   out->filenum = static_cast<uint32_t>(filenum);
   out->offset = offset;
   out->logic_id = logic_id;
   out->server_id = static_cast<uint32_t>(server_id);
+  out->term_id = static_cast<uint32_t>(term_id);
   out->ts_ms = ts_ms;
   return true;
 }

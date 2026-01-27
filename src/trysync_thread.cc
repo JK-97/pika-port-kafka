@@ -7,6 +7,7 @@
 #include "conf.h"
 #include "const.h"
 #include "pika_port.h"
+#include "snapshot_sender.h"
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -245,129 +246,16 @@ bool TrysyncThread::TryUpdateMasterOffset() {
   return true;
 }
 
-#include <iostream>
-#include <sstream>
-
-#include "rocksdb/db.h"
-#include "rocksdb/slice.h"
-#include "rocksdb/status.h"
-
-using std::chrono::high_resolution_clock;
-using std::chrono::milliseconds;
-
 int TrysyncThread::Retransmit() {
-  std::string db_path = g_conf.dump_path;
-  size_t thread_num = g_conf.forward_thread_num;
-
-  rocksdb::Status s;
-
-  high_resolution_clock::time_point start = high_resolution_clock::now();
-  if (db_path[db_path.length() - 1] != '/') {
-    db_path.append("/");
-  }
-
-  // Init SenderThread
-  for (size_t i = 0; i < thread_num; i++) {
-    senders_.emplace_back(new KafkaSender(static_cast<int>(i), g_conf, g_pika_port->checkpoint_manager()));
-  }
-
-  // Init db
-  rocksdb::Options options;
-  options.create_if_missing = true;
-  options.keep_log_file_num = 10;
-  options.max_manifest_file_size = 64 * 1024 * 1024;
-  options.max_log_file_size = 512 * 1024 * 1024;
-  options.write_buffer_size = 512 * 1024 * 1024;     // 512M
-  options.target_file_size_base = 40 * 1024 * 1024;  // 40M
-
-  storage::StorageOptions bwOptions;
-  bwOptions.options = options;
-
-  storage::Storage bw;
-  std::string db_root = db_path;
-  if (db_root.back() != '/') {
-    db_root.append("/");
-  }
-  std::string candidate = db_root + g_conf.db_name;
-  if (pstd::FileExists(candidate)) {
-    db_root = candidate;
-  } else {
-    db_root = db_path;
-  }
-
-  s = bw.Open(bwOptions, db_root);
-  LOG(INFO) << "Open db path " << db_root << " result " << s.ToString();
-  if (s.ok()) {
-    migrators_.emplace_back(
-        new MigratorThread(&bw, &senders_, static_cast<int>(storage::DataType::kStrings), thread_num));
-    migrators_.emplace_back(
-        new MigratorThread(&bw, &senders_, static_cast<int>(storage::DataType::kLists), thread_num));
-    migrators_.emplace_back(
-        new MigratorThread(&bw, &senders_, static_cast<int>(storage::DataType::kHashes), thread_num));
-    migrators_.emplace_back(
-        new MigratorThread(&bw, &senders_, static_cast<int>(storage::DataType::kSets), thread_num));
-    migrators_.emplace_back(
-        new MigratorThread(&bw, &senders_, static_cast<int>(storage::DataType::kZSets), thread_num));
-  }
-
+  SnapshotSender sender(g_conf, g_pika_port->checkpoint_manager());
   retransmit_mutex_.lock();
   retransmit_flag_ = true;
   retransmit_mutex_.unlock();
-
-  // start threads
-  size_t size = senders_.size();
-  for (size_t i = 0; i < size; i++) {
-    senders_[i]->StartThread();
-  }
-
-  size = migrators_.size();
-  for (size_t i = 0; i < size; i++) {
-    migrators_[i]->StartThread();
-  }
-  size = migrators_.size();
-  for (size_t i = 0; i < size; i++) {
-    migrators_[i]->JoinThread();
-  }
-
-  size = senders_.size();
-  for (size_t i = 0; i < size; i++) {
-    senders_[i]->Stop();
-  }
-  size = senders_.size();
-  for (size_t i = 0; i < size; i++) {
-    senders_[i]->JoinThread();
-  }
-
+  int ret = sender.Run();
   retransmit_mutex_.lock();
   retransmit_flag_ = false;
   retransmit_mutex_.unlock();
-
-  int64_t replies = 0;
-  int64_t records = 0;
-  size = migrators_.size();
-  for (size_t i = 0; i < size; i++) {
-    records += migrators_[i]->num();
-    delete migrators_[i];
-  }
-  size = senders_.size();
-  for (size_t i = 0; i < thread_num; i++) {
-    replies += senders_[i]->elements();
-    delete senders_[i];
-  }
-
-  high_resolution_clock::time_point end = high_resolution_clock::now();
-  std::chrono::hours hours = std::chrono::duration_cast<std::chrono::hours>(end - start);
-  std::chrono::minutes minutes = std::chrono::duration_cast<std::chrono::minutes>(end - start);
-  std::chrono::seconds seconds = std::chrono::duration_cast<std::chrono::seconds>(end - start);
-
-  LOG(INFO) << "=============== Retransmitting =====================";
-  LOG(INFO) << "Running time  :";
-  LOG(INFO) << hours.count() << " hour " << minutes.count() - hours.count() * 60 << " min "
-            << seconds.count() - hours.count() * 60 * 60 << " s";
-  LOG(INFO) << "Total records : " << records << " have been Scaned";
-  LOG(INFO) << "Total events : " << replies << " delivered to kafka";
-  // delete db
-  return 0;
+  return ret;
 }
 
 void* TrysyncThread::ThreadMain() {

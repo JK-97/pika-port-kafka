@@ -5,7 +5,7 @@
 
 ## 1. 前置条件
 
-- 可访问的 PikiwiDB master（支持 trysync/rsync 同步流程）
+- 可访问的 PikiwiDB master（支持 PB 复制或 legacy trysync/rsync）
 - Kafka 可用，topic 已创建（含 compacted offsets topic）
 - 已编译得到 `pika_port`（见 `docs/build.md`）
 
@@ -35,6 +35,7 @@
 - `-S` snapshot topic（`dual` 必填）
 - `-B` binlog topic（`dual` 必填）
 - `-T` single topic（`single` 必填）
+- `-R` 同步协议：`auto` | `legacy` | `pb`（默认 `auto`）
 
 断点恢复与标识：
 
@@ -43,13 +44,18 @@
 - `-U` source_id（默认 `master_ip:master_port`）
 - `-f/-s` 手动指定 binlog filenum/offset（设置后不会加载 checkpoint）
 
-网络/端口：
+网络/端口（legacy 模式）：
 
 - `-t` 本机可被 master 访问的 IP（默认值见配置）
 - `-p` 本机端口（默认值见配置）
   - binlog 接收端口：`local_port + <binlog_port_offset>`（偏移在代码中固定）
   - rsync 端口：`local_port + <rsync_port_offset>`（偏移在代码中固定）
   - 以上端口需被 master 访问
+
+网络/端口（pb/auto 模式）：
+
+- 本地无需对外开放端口
+- 会访问 master 的 `master_port + 2000`（PB 复制）与 `master_port + 10001`（rsync2）
 
 性能/运行：
 
@@ -67,6 +73,7 @@
 说明：
 
 - `-m/-n/-y` 为历史参数（forward 相关），Kafka 模式不再使用，可忽略。
+- `-R auto` 会优先探测 PB 复制端口，失败则回退 legacy。
 
 ## 4. 示例
 
@@ -77,7 +84,7 @@
   -t <LOCAL_IP> -p <LOCAL_PORT> \
   -i <PIKA_MASTER_IP> -o <PIKA_MASTER_PORT> \
   -k <KAFKA_BROKERS> \
-  -M dual -S <SNAPSHOT_TOPIC> -B <BINLOG_TOPIC> -O <OFFSETS_TOPIC> \
+  -M dual -S <SNAPSHOT_TOPIC> -B <BINLOG_TOPIC> -O <OFFSETS_TOPIC> -R auto \
   -P ./checkpoint.json -D db0 -x 4 -b 512 -z 1800 -E true \
   -l ./log -r ./rsync_dump
 ```
@@ -89,7 +96,7 @@
   -t <LOCAL_IP> -p <LOCAL_PORT> \
   -i <PIKA_MASTER_IP> -o <PIKA_MASTER_PORT> \
   -k <KAFKA_BROKERS> \
-  -M single -T <STREAM_TOPIC> -O <OFFSETS_TOPIC> \
+  -M single -T <STREAM_TOPIC> -O <OFFSETS_TOPIC> -R auto \
   -P ./checkpoint.json -D db0 -x 4 -b 512 -z 1800 -E true \
   -l ./log -r ./rsync_dump
 ```

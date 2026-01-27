@@ -186,6 +186,49 @@ std::string BuildBinlogEventJson(const net::RedisCmdArgsType& argv,
   AppendJsonNumber(&out, "offset", item.offset(), &binlog_first);
   AppendJsonNumber(&out, "logic_id", item.logic_id(), &binlog_first);
   AppendJsonNumber(&out, "server_id", item.server_id(), &binlog_first);
+  AppendJsonNumber(&out, "term_id", 0, &binlog_first);
+  out.append("}");
+
+  AppendSourceObject(&out, source_id, &first);
+  out.append("}");
+  return out;
+}
+
+std::string BuildBinlogEventJson(const net::RedisCmdArgsType& argv,
+                                 const BinlogItem& item,
+                                 const std::string& db_name,
+                                 const std::string& data_type,
+                                 const std::string& source_id,
+                                 const std::string& raw_resp,
+                                 const std::string& key) {
+  std::string out;
+  out.reserve(512);
+  bool first = true;
+  out.append("{");
+  AppendJsonString(&out, "event_type", "binlog", &first);
+  if (!argv.empty()) {
+    AppendJsonString(&out, "op", ToLower(argv[0]), &first);
+  }
+  AppendJsonString(&out, "data_type", data_type, &first);
+  AppendJsonString(&out, "db", db_name, &first);
+  AppendJsonNumber(&out, "slot", 0, &first);
+  AppendJsonString(&out, "key", key, &first);
+  out.append(",\"args_b64\":");
+  out.append(BuildArgsB64Json(argv));
+  AppendJsonString(&out, "raw_resp_b64", Base64Encode(raw_resp), &first);
+  AppendJsonNumber(&out, "ts_ms", static_cast<uint64_t>(item.exec_time()) * 1000, &first);
+  std::string event_id = std::to_string(item.term_id()) + ":" + std::to_string(item.filenum()) + ":" +
+                         std::to_string(item.offset()) + ":" + std::to_string(item.logic_id());
+  AppendJsonString(&out, "event_id", event_id, &first);
+  AppendJsonString(&out, "source_id", source_id, &first);
+
+  out.append(",\"binlog\":{");
+  bool binlog_first = true;
+  AppendJsonNumber(&out, "filenum", item.filenum(), &binlog_first);
+  AppendJsonNumber(&out, "offset", item.offset(), &binlog_first);
+  AppendJsonNumber(&out, "logic_id", item.logic_id(), &binlog_first);
+  AppendJsonNumber(&out, "server_id", 0, &binlog_first);
+  AppendJsonNumber(&out, "term_id", item.term_id(), &binlog_first);
   out.append("}");
 
   AppendSourceObject(&out, source_id, &first);

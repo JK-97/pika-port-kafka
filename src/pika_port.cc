@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <cassert>
+#include <memory>
 
 #include <glog/logging.h>
 #include <functional>
@@ -16,6 +17,7 @@
 #include "conf.h"
 #include "const.h"
 #include "event_builder.h"
+#include "net/include/net_cli.h"
 #include "pika_port.h"
 #include "pstd/include/env.h"
 #include "pstd/include/rsync.h"
@@ -31,7 +33,9 @@ PikaPort::PikaPort(std::string& master_ip, int master_port, std::string& passwd)
       requirepass_(passwd),
       should_exit_(false),
       sid_(0),
-      checkpoint_manager_(nullptr) {
+      checkpoint_manager_(nullptr),
+      pb_repl_client_(nullptr),
+      use_pb_sync_(false) {
   // Init ip host
   if (!Init()) {
     LOG(FATAL) << "Init iotcl error";
@@ -59,6 +63,7 @@ PikaPort::~PikaPort() {
   delete ping_thread_;
   sleep(1);
   delete binlog_receiver_thread_;
+  delete pb_repl_client_;
 
   delete logger_;
   delete checkpoint_manager_;
@@ -76,7 +81,13 @@ void PikaPort::Cleanup() {
   if (ping_thread_) {
     ping_thread_->StopThread();
   }
-  trysync_thread_->Stop();
+  if (use_pb_sync_) {
+    if (pb_repl_client_) {
+      pb_repl_client_->Stop();
+    }
+  } else {
+    trysync_thread_->Stop();
+  }
   size_t thread_num = g_conf.forward_thread_num;
   for (size_t i = 0; i < thread_num; i++) {
     senders_[i]->Stop();
@@ -104,15 +115,38 @@ void PikaPort::Start() {
     senders_[i]->StartThread();
   }
 
-  // sender_->StartThread();
-  trysync_thread_->StartThread();
-  binlog_receiver_thread_->StartThread();
-
   // if (g_conf.filenum >= 0 && g_conf.filenum != UINT32_MAX && g_conf.offset >= 0) {
   if (g_conf.filenum != UINT32_MAX) {
     logger_->SetProducerStatus(g_conf.filenum, g_conf.offset);
   }
-  SetMaster(master_ip_, master_port_);
+
+  auto should_use_pb = [&]() -> bool {
+    if (g_conf.sync_protocol == "pb") {
+      return true;
+    }
+    if (g_conf.sync_protocol == "legacy") {
+      return false;
+    }
+    std::unique_ptr<net::NetCli> cli(net::NewPbCli());
+    cli->set_connect_timeout(500);
+    if (cli->Connect(master_ip_, master_port_ + kPortShiftReplServer, "").ok()) {
+      cli->Close();
+      return true;
+    }
+    return false;
+  };
+
+  use_pb_sync_ = should_use_pb();
+  if (use_pb_sync_) {
+    pb_repl_client_ = new PbReplClient(this);
+    pb_repl_client_->Start();
+    LOG(INFO) << "Using PB replication protocol";
+  } else {
+    trysync_thread_->StartThread();
+    binlog_receiver_thread_->StartThread();
+    SetMaster(master_ip_, master_port_);
+    LOG(INFO) << "Using legacy trysync protocol";
+  }
 
   mutex_.lock();
   mutex_.lock();
@@ -181,6 +215,42 @@ int PikaPort::PublishBinlogEvent(const net::RedisCmdArgsType& argv,
   record.checkpoint.offset = item.offset();
   record.checkpoint.logic_id = item.logic_id();
   record.checkpoint.server_id = item.server_id();
+  record.checkpoint.term_id = 0;
+  record.checkpoint.ts_ms = static_cast<uint64_t>(item.exec_time()) * 1000;
+
+  if (senders_.empty()) {
+    return -1;
+  }
+  size_t idx = 0;
+  if (!record.key.empty()) {
+    idx = std::hash<std::string>()(record.key) % senders_.size();
+  }
+  senders_[idx]->Enqueue(record);
+  return 0;
+}
+
+int PikaPort::PublishBinlogEvent(const net::RedisCmdArgsType& argv,
+                                 const BinlogItem& item,
+                                 const std::string& raw_resp,
+                                 const std::string& key) {
+  std::string resolved_key = key;
+  if (resolved_key.empty() && argv.size() > 1) {
+    resolved_key = argv[1];
+  }
+  std::string data_type = CommandDataType(argv.empty() ? "" : argv[0]);
+  std::string payload = BuildBinlogEventJson(argv, item, g_conf.db_name, data_type, g_conf.source_id, raw_resp,
+                                             resolved_key);
+
+  KafkaRecord record;
+  record.topic = SelectTopicForEvent("binlog");
+  record.key = BuildPartitionKey(g_conf.db_name, data_type, resolved_key);
+  record.payload = std::move(payload);
+  record.has_checkpoint = true;
+  record.checkpoint.filenum = item.filenum();
+  record.checkpoint.offset = item.offset();
+  record.checkpoint.logic_id = item.logic_id();
+  record.checkpoint.server_id = 0;
+  record.checkpoint.term_id = item.term_id();
   record.checkpoint.ts_ms = static_cast<uint64_t>(item.exec_time()) * 1000;
 
   if (senders_.empty()) {

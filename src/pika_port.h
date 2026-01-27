@@ -11,7 +11,9 @@
 #include "checkpoint.h"
 #include "kafka_sender.h"
 #include "pika_binlog.h"
+#include "pika_binlog_transverter.h"
 #include "pika_define.h"
+#include "pb_repl_client.h"
 #include "pstd/include/pstd_mutex.h"
 #include "pstd/include/pstd_status.h"
 #include "slaveping_thread.h"
@@ -61,6 +63,10 @@ class PikaPort {
                          const PortBinlogItem& item,
                          const std::string& raw_resp,
                          const std::string& key);
+  int PublishBinlogEvent(const net::RedisCmdArgsType& argv,
+                         const BinlogItem& item,
+                         const std::string& raw_resp,
+                         const std::string& key);
   std::string SelectTopicForEvent(const std::string& event_type) const;
 
   bool SetMaster(std::string& master_ip, int master_port);
@@ -105,6 +111,8 @@ class PikaPort {
 
   BinlogReceiverThread* binlog_receiver_thread_;
   TrysyncThread* trysync_thread_;
+  PbReplClient* pb_repl_client_;
+  bool use_pb_sync_;
 
   Binlog* logger_;
 

@@ -11,6 +11,8 @@
 #define PIKA_MAX_WORKER_THREAD_NUM 24
 
 const std::string kPikaPidFile = "pika.pid";
+const int kPortShiftReplServer = 2000;
+const int kPortShiftRsync2 = 10001;
 
 struct WorkerCronTask {
   int task;

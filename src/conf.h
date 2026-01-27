@@ -32,6 +32,7 @@ class Conf {
     db_name = "db0";
     kafka_enable_idempotence = true;
     kafka_stream_mode = "dual";
+    sync_protocol = "auto";
   }
 
  public:
@@ -63,6 +64,7 @@ class Conf {
   std::string db_name;
   bool kafka_enable_idempotence;
   std::string kafka_stream_mode;
+  std::string sync_protocol;
 };
 
 extern Conf g_conf;

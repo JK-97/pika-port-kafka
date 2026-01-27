@@ -130,6 +130,7 @@ void Usage() {
   std::cout << "\t-U     -- source id (OPTIONAL host:port)" << std::endl;
   std::cout << "\t-D     -- db name label (OPTIONAL default: db0)" << std::endl;
   std::cout << "\t-E     -- enable idempotence (true|false)" << std::endl;
+  std::cout << "\t-R     -- sync protocol (auto|legacy|pb)" << std::endl;
   std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 -m 127.0.0.1 -n 6379 -x 7 -f 0 -s 0 "
                "-w abc -l ./log -r ./rsync_dump -b 512 -d -e"
             << std::endl;
@@ -163,6 +164,7 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Source_id:" << g_conf.source_id << std::endl;
   std::cout << "Db_name:" << g_conf.db_name << std::endl;
   std::cout << "Kafka_enable_idempotence:" << (g_conf.kafka_enable_idempotence ? "true" : "false") << std::endl;
+  std::cout << "Sync_protocol:" << g_conf.sync_protocol << std::endl;
   std::cout << "Startup Time : " << asctime(localtime(&now));
   std::cout << "========================================================" << std::endl;
 }
@@ -177,7 +179,7 @@ int main(int argc, char* argv[]) {
   char buf[1024];
   bool is_daemon = false;
   long num = 0;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:m:n:x:y:z:b:edhk:c:S:B:T:O:P:M:U:D:E:"))) {
+  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:m:n:x:y:z:b:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -299,6 +301,10 @@ int main(int argc, char* argv[]) {
         snprintf(buf, 1024, "%s", optarg);
         g_conf.kafka_enable_idempotence = (std::string(buf) == "true");
         break;
+      case 'R':
+        snprintf(buf, 1024, "%s", optarg);
+        g_conf.sync_protocol = std::string(buf);
+        break;
       case 'e':
         g_conf.exit_if_dbsync = true;
         break;
@@ -320,6 +326,9 @@ int main(int argc, char* argv[]) {
   }
   if (g_conf.kafka_stream_mode != "dual" && g_conf.kafka_stream_mode != "single") {
     g_conf.kafka_stream_mode = "dual";
+  }
+  if (g_conf.sync_protocol != "auto" && g_conf.sync_protocol != "legacy" && g_conf.sync_protocol != "pb") {
+    g_conf.sync_protocol = "auto";
   }
 
   if (g_conf.filenum == UINT32_MAX) {

@@ -5,7 +5,8 @@
 ## 1. 范围与原则
 
 - 进程形态：独立进程，伪装 Pika slave 与 master 建立同步。
-- 同步链路：沿用 trysync/dbsync/binlog，替换“转发到 Redis”逻辑为“发送到 Kafka”。
+- 同步链路：兼容 legacy trysync/dbsync/binlog 与 PB 复制（MetaSync/TrySync/DBSync/BinlogSync）。
+- 协议选择：`sync_protocol=auto|legacy|pb`（auto 优先 PB，失败回退 legacy）。
 - 交付目标：支持全量同步、增量同步、断点恢复、幂等消费。
 - 最小改动：复用 pika-port 现有解析与过滤逻辑，聚焦在数据输出层与状态管理层。
 
@@ -86,7 +87,8 @@
     "filenum": 12,
     "offset": 34567,
     "logic_id": 8899,
-    "server_id": 1
+    "server_id": 1,
+    "term_id": 0
   },
   "source": {
     "host": "10.0.0.1",
@@ -105,12 +107,14 @@
   - 避免二进制内容导致 JSON 非法
   - 消费端可选择是否还原为原始命令
 - `event_id`
-  - `server_id:filenum:offset:logic_id`，用于幂等与去重
+  - legacy：`server_id:filenum:offset:logic_id`
+  - pb：`term_id:filenum:offset:logic_id`
 - `source_id`
   - 例如 `host:port`，用于 checkpoint 与 offsets topic 的 key
 - `binlog` 字段
   - `filenum + offset` 作为“主偏移”
   - `logic_id` 作为附加校验
+  - `server_id` 与 `term_id` 按协议二选一
 
 ## 4. Offset 设计建议
 
@@ -131,6 +135,8 @@
   "filenum": 12,
   "offset": 34567,
   "logic_id": 8899,
+  "server_id": 1,
+  "term_id": 0,
   "ts_ms": 1700000000
 }
 ```
@@ -149,8 +155,8 @@
 ## 6. 断点恢复流程
 
 1. 启动时读取本地 checkpoint（若不存在则读 compacted topic）
-2. 有 checkpoint → `trysync filenum offset`
-3. 无 checkpoint → `trysync 0 0` 触发全量同步
+2. 有 checkpoint → `trysync filenum offset`（legacy）或 `TrySync`（pb）
+3. 无 checkpoint → `trysync 0 0` / `TrySync 0 0` 触发全量同步
 4. 如果 master 返回 `sync point purged` → 自动回退到全量同步
 
 ## 7. 幂等与去重路径
@@ -182,7 +188,7 @@
 ## 9. 同步流程（改造后）
 
 1. 进程启动 → 读取 checkpoint
-2. 建立 trysync → 全量或增量
+2. 建立 legacy trysync 或 PB MetaSync/TrySync → 全量或增量
 3. 全量阶段：dump → 解析 → `snapshot topic`
 4. 增量阶段：binlog → 解析 → `binlog topic`
 5. Kafka ack → 更新 checkpoint（本地 + compacted）

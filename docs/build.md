@@ -9,19 +9,22 @@
 - CMake >= 3.18
 - make
 - librdkafka（开发包）
+- protobuf（protoc + libprotobuf）
 - 可选：libunwind / gperftools（若 PikiwiDB 构建默认启用）
 
 示例（Ubuntu）：
 
 ```bash
 apt-get update
-apt-get install -y build-essential cmake librdkafka-dev libunwind-dev libgoogle-perftools-dev
+apt-get install -y build-essential cmake librdkafka-dev libprotobuf-dev protobuf-compiler \
+  libunwind-dev libgoogle-perftools-dev
 ```
 
 示例（CentOS/Rocky）：
 
 ```bash
-yum install -y gcc gcc-c++ make cmake librdkafka-devel libunwind-devel gperftools-devel
+yum install -y gcc gcc-c++ make cmake librdkafka-devel protobuf-devel protobuf-compiler \
+  libunwind-devel gperftools-devel
 ```
 
 ## 2. 编译 PikiwiDB 基础库
@@ -101,6 +104,8 @@ cmake -S . -B build -DUSE_PIKA_TOOLS=OFF -DWITH_COMMAND_DOCS=OFF \
 ```
 
 默认情况下脚本会禁用 `libunwind` 和 `gperftools`（可用 `--enable-libunwind` / `--enable-gperftools` 开启）。
+protobuf 默认使用 PikiwiDB deps 目录下的 `libprotobuf.a` 与 `protoc`，也可通过
+`--protobuf-lib` / `--protobuf-protoc` 覆盖。
 
 手动方式（不使用脚本）：
 
@@ -118,7 +123,9 @@ cmake -S ./src -B ./build \
   -DZSTD_LIBRARY=/path/to/pikiwidb/deps/lib/libzstd.a \
   -DFMT_LIBRARY=/path/to/pikiwidb/deps/lib/libfmt.a \
   -DJEMALLOC_LIBRARY=/path/to/pikiwidb/deps/lib/libjemalloc.a \
-  -DBZ2_LIBRARY=/path/to/system/libbz2.so
+  -DBZ2_LIBRARY=/path/to/system/libbz2.so \
+  -DPROTOBUF_LIBRARY=/path/to/pikiwidb/deps/lib/libprotobuf.a \
+  -DPROTOBUF_PROTOC=/path/to/pikiwidb/deps/bin/protoc
 cmake --build ./build -j$(nproc)
 ```
 
