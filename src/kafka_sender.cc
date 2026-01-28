@@ -44,6 +44,9 @@ void KafkaSender::Enqueue(const KafkaRecord& record) {
     return;
   }
 
+  LOG(WARNING) << "KafkaSender queue full, waiting to enqueue (id=" << id_
+               << " size=" << queue_.size() << ")";
+
   queue_signal_.wait(lock, [this] { return queue_.size() <= 100000 || should_exit_.load(); });
   if (should_exit_) {
     return;
