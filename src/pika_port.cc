@@ -46,7 +46,7 @@ PikaPort::PikaPort(std::string& master_ip, int master_port, std::string& passwd)
   checkpoint_manager_ = new CheckpointManager(g_conf.checkpoint_path, g_conf.source_id,
                                               g_conf.kafka_topic_offsets, g_conf.kafka_brokers);
 
-  size_t thread_num = g_conf.forward_thread_num;
+  size_t thread_num = g_conf.kafka_sender_threads;
   for (size_t i = 0; i < thread_num; i++) {
     senders_.emplace_back(new KafkaSender(static_cast<int>(i), g_conf, checkpoint_manager_));
   }
@@ -91,7 +91,7 @@ void PikaPort::Cleanup() {
   } else {
     trysync_thread_->Stop();
   }
-  size_t thread_num = g_conf.forward_thread_num;
+  size_t thread_num = g_conf.kafka_sender_threads;
   for (size_t i = 0; i < thread_num; i++) {
     senders_[i]->Stop();
   }
@@ -157,7 +157,7 @@ void PikaPort::HeartbeatLoop() {
 
 void PikaPort::Start() {
   // start redis sender threads
-  size_t thread_num = g_conf.forward_thread_num;
+  size_t thread_num = g_conf.kafka_sender_threads;
   for (size_t i = 0; i < thread_num; i++) {
     senders_[i]->StartThread();
   }

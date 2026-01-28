@@ -11,9 +11,6 @@ class Conf {
     local_port = 0;
     master_ip = "127.0.0.1";
     master_port = 0;
-    forward_ip = "127.0.0.1";
-    forward_port = 0;
-    forward_thread_num = 1;
     filenum = size_t(UINT32_MAX);  // src/pika_trysync_thread.cc:48
     offset = 0;
     log_path = "./log/";
@@ -35,6 +32,7 @@ class Conf {
     sync_protocol = "auto";
     heartbeat_interval_ms = 60000;
     kafka_message_max_bytes = 1000000;
+    kafka_sender_threads = 1;
   }
 
  public:
@@ -44,10 +42,6 @@ class Conf {
   int local_port;
   std::string master_ip;
   int master_port;
-  std::string forward_ip;
-  int forward_port;
-  std::string forward_passwd;
-  int forward_thread_num;
   std::string passwd;
   std::string log_path;
   std::string dump_path;
@@ -69,6 +63,7 @@ class Conf {
   std::string sync_protocol;
   int64_t heartbeat_interval_ms;
   int64_t kafka_message_max_bytes;
+  int kafka_sender_threads;
 };
 
 extern Conf g_conf;

@@ -204,7 +204,7 @@
   - checkpoint_path
   - source_id
 - 全量/增量
-  - forward_thread_num（可复用现有）
+  - kafka_sender_threads
   - filter_rules（命令/DB/数据结构过滤）
 
 ## 11. 监控与告警指标（建议）

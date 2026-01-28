@@ -105,10 +105,7 @@ void Usage() {
   std::cout << "\t-p     -- local port(OPTIONAL)" << std::endl;
   std::cout << "\t-i     -- master ip(OPTIONAL default: 127.0.0.1)" << std::endl;
   std::cout << "\t-o     -- master port(REQUIRED)" << std::endl;
-  std::cout << "\t-m     -- forward ip(OPTIONAL default: 127.0.0.1)" << std::endl;
-  std::cout << "\t-n     -- forward port(REQUIRED)" << std::endl;
-  std::cout << "\t-x     -- forward thread num(OPTIONAL default: 1)" << std::endl;
-  std::cout << "\t-y     -- forward password(OPTIONAL)" << std::endl;
+  std::cout << "\t-x     -- kafka sender threads(OPTIONAL default: 1)" << std::endl;
   std::cout << "\t-z     -- max timeout duration for waiting pika master bgsave data (OPTIONAL default 1800s)"
             << std::endl;
   std::cout << "\t-f     -- binlog filenum(OPTIONAL default: local offset)" << std::endl;
@@ -133,8 +130,9 @@ void Usage() {
   std::cout << "\t-R     -- sync protocol (auto|legacy|pb)" << std::endl;
   std::cout << "\t-H     -- heartbeat log interval seconds (OPTIONAL default: 60, min: 1, 0 disables)" << std::endl;
   std::cout << "\t-J     -- kafka producer message.max.bytes (OPTIONAL default: 1000000)" << std::endl;
-  std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 -m 127.0.0.1 -n 6379 -x 7 -f 0 -s 0 "
-               "-w abc -l ./log -r ./rsync_dump -b 512 -d -e"
+  std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 "
+               "-k 127.0.0.1:9092 -M dual -S pika.snapshot -B pika.binlog -O __pika_port_kafka_offsets "
+               "-x 4 -R auto -l ./log -r ./rsync_dump -b 512 -E true"
             << std::endl;
 }
 
@@ -144,10 +142,7 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Local_port:" << g_conf.local_port << std::endl;
   std::cout << "Master_ip:" << g_conf.master_ip << std::endl;
   std::cout << "Master_port:" << g_conf.master_port << std::endl;
-  std::cout << "Forward_ip:" << g_conf.forward_ip << std::endl;
-  std::cout << "Forward_port:" << g_conf.forward_port << std::endl;
-  std::cout << "Forward_passwd:" << g_conf.forward_passwd << std::endl;
-  std::cout << "Forward_thread_num:" << g_conf.forward_thread_num << std::endl;
+  std::cout << "Kafka_sender_threads:" << g_conf.kafka_sender_threads << std::endl;
   std::cout << "Wait_bgsave_timeout:" << g_conf.wait_bgsave_timeout << std::endl;
   std::cout << "Log_path:" << g_conf.log_path << std::endl;
   std::cout << "Dump_path:" << g_conf.dump_path << std::endl;
@@ -183,7 +178,7 @@ int main(int argc, char* argv[]) {
   char buf[1024];
   bool is_daemon = false;
   long num = 0;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:m:n:x:y:z:b:H:J:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
+  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:z:b:H:J:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -203,23 +198,10 @@ int main(int argc, char* argv[]) {
         pstd::string2int(buf, strlen(buf), &(num));
         g_conf.master_port = static_cast<int>(num);
         break;
-      case 'm':
-        snprintf(buf, 1024, "%s", optarg);
-        g_conf.forward_ip = std::string(buf);
-        break;
-      case 'n':
-        snprintf(buf, 1024, "%s", optarg);
-        pstd::string2int(buf, strlen(buf), &(num));
-        g_conf.forward_port = static_cast<int>(num);
-        break;
       case 'x':
         snprintf(buf, 1024, "%s", optarg);
         pstd::string2int(buf, strlen(buf), &(num));
-        g_conf.forward_thread_num = static_cast<int>(num);
-        break;
-      case 'y':
-        snprintf(buf, 1024, "%s", optarg);
-        g_conf.forward_passwd = std::string(buf);
+        g_conf.kafka_sender_threads = static_cast<int>(num);
         break;
       case 'z':
         snprintf(buf, 1024, "%s", optarg);

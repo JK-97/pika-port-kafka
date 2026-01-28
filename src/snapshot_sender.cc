@@ -27,7 +27,7 @@ int SnapshotSender::Run() {
   }
 
   high_resolution_clock::time_point start = high_resolution_clock::now();
-  size_t thread_num = conf_.forward_thread_num;
+  size_t thread_num = conf_.kafka_sender_threads;
 
   std::vector<KafkaSender*> senders;
   std::vector<MigratorThread*> migrators;
