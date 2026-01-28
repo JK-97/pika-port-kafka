@@ -36,7 +36,7 @@ class PbReplClient {
   bool SendMetaSync();
   bool SendTrySync(const Offset& offset, int32_t* session_id, int* reply_code);
   bool SendDBSync(const Offset& offset, int32_t* session_id);
-  bool SendBinlogSyncAck(const Offset& offset, int32_t session_id, bool first_send);
+  bool SendBinlogSyncAck(const Offset& range_start, const Offset& range_end, int32_t session_id, bool first_send);
   bool StartBinlogSyncLoop(const Offset& start_offset, int32_t session_id);
   bool PerformFullSync(Offset* new_offset);
   bool LoadBgsaveInfo(Offset* offset);

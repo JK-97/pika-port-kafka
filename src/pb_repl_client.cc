@@ -211,7 +211,8 @@ bool PbReplClient::SendDBSync(const Offset& offset, int32_t* session_id) {
   return true;
 }
 
-bool PbReplClient::SendBinlogSyncAck(const Offset& offset, int32_t session_id, bool first_send) {
+bool PbReplClient::SendBinlogSyncAck(const Offset& range_start, const Offset& range_end, int32_t session_id,
+                                     bool first_send) {
   InnerMessage::InnerRequest request;
   request.set_type(InnerMessage::kBinlogSync);
   InnerMessage::InnerRequest::BinlogSync* binlog_sync = request.mutable_binlog_sync();
@@ -224,13 +225,13 @@ bool PbReplClient::SendBinlogSyncAck(const Offset& offset, int32_t session_id, b
   binlog_sync->set_session_id(session_id);
 
   InnerMessage::BinlogOffset* ack_start = binlog_sync->mutable_ack_range_start();
-  ack_start->set_filenum(offset.filenum);
-  ack_start->set_offset(offset.offset);
+  ack_start->set_filenum(range_start.filenum);
+  ack_start->set_offset(range_start.offset);
   ack_start->set_term(0);
   ack_start->set_index(0);
   InnerMessage::BinlogOffset* ack_end = binlog_sync->mutable_ack_range_end();
-  ack_end->set_filenum(offset.filenum);
-  ack_end->set_offset(offset.offset);
+  ack_end->set_filenum(range_end.filenum);
+  ack_end->set_offset(range_end.offset);
   ack_end->set_term(0);
   ack_end->set_index(0);
 
@@ -356,13 +357,15 @@ bool PbReplClient::PerformFullSync(Offset* new_offset) {
 
 bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t session_id) {
   Offset last_sent_ack = start_offset;
+  Offset pending_ack_start;
+  bool has_pending_ack = false;
   auto last_ack_time = std::chrono::steady_clock::now();
   auto last_warn_time = std::chrono::steady_clock::now();
   auto last_binlog_time = std::chrono::steady_clock::now();
   auto last_non_binlog_log = last_binlog_time;
   auto last_session_mismatch_log = last_binlog_time;
   const auto log_throttle = std::chrono::milliseconds(5000);
-  if (!SendBinlogSyncAck(start_offset, session_id, true)) {
+  if (!SendBinlogSyncAck(start_offset, start_offset, session_id, true)) {
     return false;
   }
   UpdateProcessedOffset(start_offset);
@@ -384,6 +387,7 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
       if (response.type() == InnerMessage::kBinlogSync) {
         bool matched_session = false;
         bool logged_mismatch = false;
+        Offset batch_start;
         Offset batch_end;
         bool has_batch_end = false;
         for (int i = 0; i < response.binlog_sync_size(); ++i) {
@@ -436,6 +440,10 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
           if (ret != 0) {
             LOG(WARNING) << "pb repl: publish binlog event failed, ret=" << ret;
           } else {
+            if (!has_batch_end) {
+              batch_start.filenum = binlog_item.filenum();
+              batch_start.offset = binlog_item.offset();
+            }
             batch_end.filenum = binlog_item.filenum();
             batch_end.offset = binlog_item.offset();
             has_batch_end = true;
@@ -443,6 +451,10 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
         }
         if (has_batch_end) {
           UpdateProcessedOffset(batch_end);
+          if (!has_pending_ack) {
+            pending_ack_start = batch_start;
+            has_pending_ack = true;
+          }
         }
         if (matched_session) {
           last_binlog_time = now;
@@ -481,16 +493,32 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
         return false;
       }
     }
-    if (OffsetNewer(committed, last_sent_ack) || ms_since >= kAckIntervalMs) {
-      SendBinlogSyncAck(committed, session_id, false);
-      last_sent_ack = committed;
-      {
-        std::lock_guard<std::mutex> lock(ack_mu_);
-        if (ack_state_.active && ack_state_.session_id == session_id) {
-          ack_state_.last_sent = last_sent_ack;
+    bool send_ping = false;
+    bool should_send_ack = false;
+    Offset ack_start;
+    Offset ack_end;
+    if (has_pending_ack && OffsetNewer(committed, last_sent_ack)) {
+      ack_start = pending_ack_start;
+      ack_end = committed;
+      should_send_ack = true;
+    } else if (ms_since >= kAckIntervalMs) {
+      ack_start = Offset();
+      ack_end = Offset();
+      send_ping = true;
+      should_send_ack = true;
+    }
+    if (should_send_ack) {
+      if (SendBinlogSyncAck(ack_start, ack_end, session_id, false)) {
+        last_ack_time = now;
+        if (!send_ping) {
+          last_sent_ack = ack_end;
+          has_pending_ack = false;
+          std::lock_guard<std::mutex> lock(ack_mu_);
+          if (ack_state_.active && ack_state_.session_id == session_id) {
+            ack_state_.last_sent = last_sent_ack;
+          }
         }
       }
-      last_ack_time = now;
     }
   }
   StopAckKeepalive();
@@ -597,24 +625,8 @@ void PbReplClient::AckKeepaliveLoop() {
       continue;
     }
     int32_t session_id = ack_state_.session_id;
-    Offset last_sent = ack_state_.last_sent;
     lock.unlock();
 
-    Offset committed = last_sent;
-    Offset processed;
-    if (GetProcessedOffset(&processed) && OffsetNewer(processed, committed)) {
-      committed = processed;
-    }
-    if (OffsetNewer(last_sent, committed)) {
-      committed = last_sent;
-    }
-    if (SendBinlogSyncAck(committed, session_id, false)) {
-      std::lock_guard<std::mutex> update_lock(ack_mu_);
-      if (ack_state_.active && ack_state_.session_id == session_id) {
-        if (OffsetNewer(committed, ack_state_.last_sent)) {
-          ack_state_.last_sent = committed;
-        }
-      }
-    }
+    SendBinlogSyncAck(Offset(), Offset(), session_id, false);
   }
 }
