@@ -56,6 +56,7 @@ void PbReplClient::Start() {
 
 void PbReplClient::Stop() {
   should_stop_.store(true);
+  StopAckKeepalive();
   if (repl_cli_) {
     repl_cli_->Close();
   }
@@ -106,6 +107,7 @@ bool PbReplClient::SendMetaSync() {
     meta_sync->set_auth(g_conf.passwd);
   }
 
+  std::lock_guard<std::mutex> lock(repl_send_mu_);
   pstd::Status s = repl_cli_->Send(&request);
   if (!s.ok()) {
     LOG(WARNING) << "pb repl: send MetaSync failed " << s.ToString();
@@ -139,6 +141,7 @@ bool PbReplClient::SendTrySync(const Offset& offset, int32_t* session_id, int* r
   boffset->set_filenum(offset.filenum);
   boffset->set_offset(offset.offset);
 
+  std::lock_guard<std::mutex> lock(repl_send_mu_);
   pstd::Status s = repl_cli_->Send(&request);
   if (!s.ok()) {
     LOG(WARNING) << "pb repl: send TrySync failed " << s.ToString();
@@ -179,6 +182,7 @@ bool PbReplClient::SendDBSync(const Offset& offset, int32_t* session_id) {
   boffset->set_filenum(offset.filenum);
   boffset->set_offset(offset.offset);
 
+  std::lock_guard<std::mutex> lock(repl_send_mu_);
   pstd::Status s = repl_cli_->Send(&request);
   if (!s.ok()) {
     LOG(WARNING) << "pb repl: send DBSync failed " << s.ToString();
@@ -226,6 +230,7 @@ bool PbReplClient::SendBinlogSyncAck(const Offset& offset, int32_t session_id, b
   ack_end->set_term(0);
   ack_end->set_index(0);
 
+  std::lock_guard<std::mutex> lock(repl_send_mu_);
   pstd::Status s = repl_cli_->Send(&request);
   if (!s.ok()) {
     LOG(WARNING) << "pb repl: send BinlogSync ack failed " << s.ToString();
@@ -335,6 +340,7 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
   if (!SendBinlogSyncAck(start_offset, session_id, true)) {
     return false;
   }
+  StartAckKeepalive(session_id, start_offset);
 
   while (!should_stop_.load()) {
     InnerMessage::InnerResponse response;
@@ -413,9 +419,16 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
     if (OffsetNewer(committed, last_sent_ack) || ms_since >= kAckIntervalMs) {
       SendBinlogSyncAck(committed, session_id, false);
       last_sent_ack = committed;
+      {
+        std::lock_guard<std::mutex> lock(ack_mu_);
+        if (ack_state_.active && ack_state_.session_id == session_id) {
+          ack_state_.last_sent = last_sent_ack;
+        }
+      }
       last_ack_time = now;
     }
   }
+  StopAckKeepalive();
   return true;
 }
 
@@ -481,5 +494,63 @@ void PbReplClient::ThreadMain() {
       continue;
     }
     repl_cli_->Close();
+  }
+}
+
+void PbReplClient::StartAckKeepalive(int32_t session_id, const Offset& start_offset) {
+  StopAckKeepalive();
+  {
+    std::lock_guard<std::mutex> lock(ack_mu_);
+    ack_state_.active = true;
+    ack_state_.session_id = session_id;
+    ack_state_.last_sent = start_offset;
+  }
+  ack_stop_.store(false);
+  ack_thread_ = std::thread(&PbReplClient::AckKeepaliveLoop, this);
+}
+
+void PbReplClient::StopAckKeepalive() {
+  ack_stop_.store(true);
+  ack_cv_.notify_all();
+  if (ack_thread_.joinable()) {
+    ack_thread_.join();
+  }
+  std::lock_guard<std::mutex> lock(ack_mu_);
+  ack_state_.active = false;
+  ack_state_.session_id = 0;
+}
+
+void PbReplClient::AckKeepaliveLoop() {
+  const auto interval = std::chrono::milliseconds(kAckIntervalMs);
+  while (!ack_stop_.load()) {
+    std::unique_lock<std::mutex> lock(ack_mu_);
+    ack_cv_.wait_for(lock, interval, [this]() { return ack_stop_.load(); });
+    if (ack_stop_.load()) {
+      break;
+    }
+    if (!ack_state_.active) {
+      continue;
+    }
+    int32_t session_id = ack_state_.session_id;
+    Offset last_sent = ack_state_.last_sent;
+    lock.unlock();
+
+    Offset committed = last_sent;
+    Checkpoint cp;
+    if (pika_port_->checkpoint_manager()->GetLast(&cp)) {
+      committed.filenum = cp.filenum;
+      committed.offset = cp.offset;
+    }
+    if (OffsetNewer(last_sent, committed)) {
+      committed = last_sent;
+    }
+    if (SendBinlogSyncAck(committed, session_id, false)) {
+      std::lock_guard<std::mutex> update_lock(ack_mu_);
+      if (ack_state_.active && ack_state_.session_id == session_id) {
+        if (OffsetNewer(committed, ack_state_.last_sent)) {
+          ack_state_.last_sent = committed;
+        }
+      }
+    }
   }
 }

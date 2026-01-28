@@ -2,7 +2,9 @@
 #define PB_REPL_CLIENT_H_
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -40,6 +42,9 @@ class PbReplClient {
   bool LoadBgsaveInfo(Offset* offset);
   Offset GetStartOffset() const;
   void UpdateLoggerOffset(const Offset& offset);
+  void StartAckKeepalive(int32_t session_id, const Offset& start_offset);
+  void StopAckKeepalive();
+  void AckKeepaliveLoop();
 
   static bool OffsetNewer(const Offset& a, const Offset& b);
 
@@ -49,6 +54,18 @@ class PbReplClient {
   std::thread thread_;
   std::unique_ptr<net::NetCli> repl_cli_;
   std::string local_ip_;
+  std::mutex repl_send_mu_;
+
+  std::atomic<bool> ack_stop_{false};
+  std::thread ack_thread_;
+  std::mutex ack_mu_;
+  std::condition_variable ack_cv_;
+  struct AckState {
+    bool active{false};
+    int32_t session_id{0};
+    Offset last_sent;
+  };
+  AckState ack_state_;
 };
 
 #endif  // PB_REPL_CLIENT_H_
