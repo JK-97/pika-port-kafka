@@ -2,6 +2,7 @@
 #define KAFKA_SENDER_H_
 
 #include <atomic>
+#include <cstddef>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -42,6 +43,8 @@ class KafkaSender : public net::Thread {
     CheckpointManager* checkpoint_manager;
     Checkpoint checkpoint;
     bool has_checkpoint;
+    std::string key;
+    size_t payload_size;
   };
 
   int id_;

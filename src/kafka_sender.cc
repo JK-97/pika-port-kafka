@@ -5,6 +5,29 @@
 
 #include <glog/logging.h>
 
+#include "json_utils.h"
+
+namespace {
+
+std::string TrimForLog(const std::string& value, size_t max_len) {
+  if (value.size() <= max_len) {
+    return value;
+  }
+  return value.substr(0, max_len) + "...(" + std::to_string(value.size()) + ")";
+}
+
+std::string FormatKeyForLog(const std::string& key) {
+  if (key.empty()) {
+    return "";
+  }
+  if (IsPrintableAscii(key)) {
+    return TrimForLog(key, 256);
+  }
+  return TrimForLog("b64:" + Base64Encode(key), 512);
+}
+
+}  // namespace
+
 KafkaSender::KafkaSender(int id, const Conf& conf, CheckpointManager* checkpoint_manager)
     : id_(id), conf_(conf), checkpoint_manager_(checkpoint_manager), producer_(nullptr), should_exit_(false), elements_(0) {}
 
@@ -65,7 +88,14 @@ void KafkaSender::CloseProducer() {
 void KafkaSender::DeliveryReportCallback(rd_kafka_t* rk, const rd_kafka_message_t* rkmessage, void* opaque) {
   auto* ctx = static_cast<DeliveryContext*>(rkmessage->_private);
   if (rkmessage->err) {
-    LOG(WARNING) << "Kafka delivery failed: " << rd_kafka_err2str(rkmessage->err);
+    if (ctx) {
+      LOG(WARNING) << "Kafka delivery failed: " << rd_kafka_err2str(rkmessage->err)
+                   << " key=" << FormatKeyForLog(ctx->key)
+                   << " payload_size=" << ctx->payload_size;
+    } else {
+      LOG(WARNING) << "Kafka delivery failed: " << rd_kafka_err2str(rkmessage->err)
+                   << " payload_size=" << rkmessage->len;
+    }
   } else if (ctx && ctx->has_checkpoint && ctx->checkpoint_manager) {
     ctx->checkpoint_manager->OnAck(rk, ctx->checkpoint);
   }
@@ -93,7 +123,11 @@ void* KafkaSender::ThreadMain() {
     }
 
     elements_++;
-    auto* ctx = new DeliveryContext{checkpoint_manager_, record.checkpoint, record.has_checkpoint};
+    auto* ctx = new DeliveryContext{checkpoint_manager_,
+                                    record.checkpoint,
+                                    record.has_checkpoint,
+                                    record.key,
+                                    record.payload.size()};
     rd_kafka_resp_err_t err = rd_kafka_producev(
         producer_,
         RD_KAFKA_V_TOPIC(record.topic.c_str()),
@@ -103,7 +137,9 @@ void* KafkaSender::ThreadMain() {
         RD_KAFKA_V_OPAQUE(ctx),
         RD_KAFKA_V_END);
     if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-      LOG(WARNING) << "Kafka produce failed: " << rd_kafka_err2str(err);
+      LOG(WARNING) << "Kafka produce failed: " << rd_kafka_err2str(err)
+                   << " key=" << FormatKeyForLog(record.key)
+                   << " payload_size=" << record.payload.size();
       delete ctx;
     }
 

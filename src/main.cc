@@ -131,6 +131,7 @@ void Usage() {
   std::cout << "\t-D     -- db name label (OPTIONAL default: db0)" << std::endl;
   std::cout << "\t-E     -- enable idempotence (true|false)" << std::endl;
   std::cout << "\t-R     -- sync protocol (auto|legacy|pb)" << std::endl;
+  std::cout << "\t-H     -- heartbeat log interval seconds (OPTIONAL default: 60, min: 1, 0 disables)" << std::endl;
   std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 -m 127.0.0.1 -n 6379 -x 7 -f 0 -s 0 "
                "-w abc -l ./log -r ./rsync_dump -b 512 -d -e"
             << std::endl;
@@ -165,6 +166,7 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Db_name:" << g_conf.db_name << std::endl;
   std::cout << "Kafka_enable_idempotence:" << (g_conf.kafka_enable_idempotence ? "true" : "false") << std::endl;
   std::cout << "Sync_protocol:" << g_conf.sync_protocol << std::endl;
+  std::cout << "Heartbeat_interval_ms:" << g_conf.heartbeat_interval_ms << std::endl;
   std::cout << "Startup Time : " << asctime(localtime(&now));
   std::cout << "========================================================" << std::endl;
 }
@@ -179,7 +181,7 @@ int main(int argc, char* argv[]) {
   char buf[1024];
   bool is_daemon = false;
   long num = 0;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:m:n:x:y:z:b:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
+  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:m:n:x:y:z:b:H:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -305,6 +307,15 @@ int main(int argc, char* argv[]) {
         snprintf(buf, 1024, "%s", optarg);
         g_conf.sync_protocol = std::string(buf);
         break;
+      case 'H':
+        snprintf(buf, 1024, "%s", optarg);
+        pstd::string2int(buf, strlen(buf), &(num));
+        if (num <= 0) {
+          g_conf.heartbeat_interval_ms = 0;
+        } else {
+          g_conf.heartbeat_interval_ms = static_cast<int64_t>(num) * 1000;
+        }
+        break;
       case 'e':
         g_conf.exit_if_dbsync = true;
         break;
@@ -320,7 +331,17 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  const int64_t kMinHeartbeatIntervalMs = 1000;
+  bool heartbeat_clamped = false;
+  if (g_conf.heartbeat_interval_ms > 0 && g_conf.heartbeat_interval_ms < kMinHeartbeatIntervalMs) {
+    g_conf.heartbeat_interval_ms = kMinHeartbeatIntervalMs;
+    heartbeat_clamped = true;
+  }
+
   GlogInit(g_conf.log_path, is_daemon);
+  if (heartbeat_clamped) {
+    LOG(WARNING) << "Heartbeat interval too small, set to " << g_conf.heartbeat_interval_ms << "ms";
+  }
   if (g_conf.source_id.empty()) {
     g_conf.source_id = g_conf.master_ip + ":" + std::to_string(g_conf.master_port);
   }

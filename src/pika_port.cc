@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <cassert>
+#include <chrono>
 #include <memory>
 
 #include <glog/logging.h>
@@ -35,7 +36,8 @@ PikaPort::PikaPort(std::string& master_ip, int master_port, std::string& passwd)
       sid_(0),
       checkpoint_manager_(nullptr),
       pb_repl_client_(nullptr),
-      use_pb_sync_(false) {
+      use_pb_sync_(false),
+      heartbeat_stop_(false) {
   // Init ip host
   if (!Init()) {
     LOG(FATAL) << "Init iotcl error";
@@ -77,6 +79,7 @@ bool PikaPort::Init() {
 }
 
 void PikaPort::Cleanup() {
+  StopHeartbeat();
   // shutdown server
   if (ping_thread_) {
     ping_thread_->StopThread();
@@ -106,6 +109,50 @@ void PikaPort::Cleanup() {
 
   delete this;  // PikaPort is a global object
   // ::google::ShutdownGoogleLogging();
+}
+
+void PikaPort::StartHeartbeat() {
+  if (g_conf.heartbeat_interval_ms <= 0) {
+    return;
+  }
+  heartbeat_stop_.store(false);
+  heartbeat_thread_ = std::thread(&PikaPort::HeartbeatLoop, this);
+}
+
+void PikaPort::StopHeartbeat() {
+  heartbeat_stop_.store(true);
+  heartbeat_cv_.notify_all();
+  if (heartbeat_thread_.joinable()) {
+    heartbeat_thread_.join();
+  }
+}
+
+void PikaPort::LogHeartbeat() {
+  std::string protocol = use_pb_sync_ ? "pb" : "legacy";
+  Checkpoint cp;
+  if (checkpoint_manager_ && checkpoint_manager_->GetLast(&cp)) {
+    LOG(INFO) << "Heartbeat: protocol=" << protocol
+              << " stream=" << g_conf.kafka_stream_mode
+              << " checkpoint=" << cp.filenum << ":" << cp.offset
+              << " logic_id=" << cp.logic_id
+              << " ts_ms=" << cp.ts_ms;
+  } else {
+    LOG(INFO) << "Heartbeat: protocol=" << protocol
+              << " stream=" << g_conf.kafka_stream_mode
+              << " checkpoint=none";
+  }
+}
+
+void PikaPort::HeartbeatLoop() {
+  const auto interval = std::chrono::milliseconds(g_conf.heartbeat_interval_ms);
+  while (!heartbeat_stop_.load()) {
+    std::unique_lock<std::mutex> lock(heartbeat_mutex_);
+    heartbeat_cv_.wait_for(lock, interval, [this]() { return heartbeat_stop_.load(); });
+    if (heartbeat_stop_.load()) {
+      break;
+    }
+    LogHeartbeat();
+  }
 }
 
 void PikaPort::Start() {
@@ -147,6 +194,8 @@ void PikaPort::Start() {
     SetMaster(master_ip_, master_port_);
     LOG(INFO) << "Using legacy trysync protocol";
   }
+
+  StartHeartbeat();
 
   mutex_.lock();
   mutex_.lock();

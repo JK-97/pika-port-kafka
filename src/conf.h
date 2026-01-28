@@ -33,6 +33,7 @@ class Conf {
     kafka_enable_idempotence = true;
     kafka_stream_mode = "dual";
     sync_protocol = "auto";
+    heartbeat_interval_ms = 60000;
   }
 
  public:
@@ -65,6 +66,7 @@ class Conf {
   bool kafka_enable_idempotence;
   std::string kafka_stream_mode;
   std::string sync_protocol;
+  int64_t heartbeat_interval_ms;
 };
 
 extern Conf g_conf;

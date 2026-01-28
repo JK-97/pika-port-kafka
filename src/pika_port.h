@@ -20,6 +20,10 @@
 #include "trysync_thread.h"
 #include "net/include/redis_cli.h"
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 using pstd::Slice;
@@ -82,13 +86,18 @@ class PikaPort {
   void WaitDBSyncFinish();
 
   void Start();
-  void Stop();
+ void Stop();
   void Cleanup();
 
   bool Init();
   SlavepingThread* ping_thread_;
 
  private:
+  void StartHeartbeat();
+  void StopHeartbeat();
+  void HeartbeatLoop();
+  void LogHeartbeat();
+
   std::string master_ip_;
   int master_port_;
   int master_connection_;
@@ -117,6 +126,11 @@ class PikaPort {
   Binlog* logger_;
 
   std::shared_mutex state_protector_;  // protect below, use for master-slave mode
+
+  std::thread heartbeat_thread_;
+  std::atomic<bool> heartbeat_stop_{false};
+  std::mutex heartbeat_mutex_;
+  std::condition_variable heartbeat_cv_;
 
   PikaPort(PikaPort& bs);
   void operator=(const PikaPort& bs);
