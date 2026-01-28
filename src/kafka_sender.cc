@@ -98,6 +98,7 @@ void* KafkaSender::ThreadMain() {
         producer_,
         RD_KAFKA_V_TOPIC(record.topic.c_str()),
         RD_KAFKA_V_KEY(record.key.data(), record.key.size()),
+        RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
         RD_KAFKA_V_VALUE(record.payload.data(), record.payload.size()),
         RD_KAFKA_V_OPAQUE(ctx),
         RD_KAFKA_V_END);
