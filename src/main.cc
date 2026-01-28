@@ -182,6 +182,8 @@ int main(int argc, char* argv[]) {
   char buf[1024];
   bool is_daemon = false;
   long num = 0;
+  bool filenum_specified = false;
+  bool offset_specified = false;
   while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:z:b:H:J:A:I:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
     switch (c) {
       case 't':
@@ -217,11 +219,13 @@ int main(int argc, char* argv[]) {
         snprintf(buf, 1024, "%s", optarg);
         pstd::string2int(buf, strlen(buf), &(num));
         g_conf.filenum = static_cast<size_t>(num);
+        filenum_specified = true;
         break;
       case 's':
         snprintf(buf, 1024, "%s", optarg);
         pstd::string2int(buf, strlen(buf), &(num));
         g_conf.offset = static_cast<size_t>(num);
+        offset_specified = true;
         break;
       case 'w':
         snprintf(buf, 1024, "%s", optarg);
@@ -392,6 +396,9 @@ int main(int argc, char* argv[]) {
       g_conf.offset = cp.offset;
       LOG(INFO) << "Loaded checkpoint filenum=" << cp.filenum << " offset=" << cp.offset;
     }
+  }
+  if ((filenum_specified || offset_specified) && g_conf.filenum == 0 && g_conf.offset == 0) {
+    LOG(WARNING) << "Start offset forced to 0: full sync (DBSync/rsync) may be triggered";
   }
 
   if (g_conf.local_port == 0) {

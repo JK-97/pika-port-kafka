@@ -115,6 +115,7 @@ void* KafkaSender::ThreadMain() {
     return nullptr;
   }
 
+  auto last_metrics = std::chrono::steady_clock::now();
   while (!should_exit_) {
     KafkaRecord record;
     {
@@ -123,6 +124,14 @@ void* KafkaSender::ThreadMain() {
                              [this]() { return should_exit_.load() || !queue_.empty(); });
       if (queue_.empty()) {
         rd_kafka_poll(producer_, 0);
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_metrics >= std::chrono::seconds(5)) {
+          size_t qsize = queue_.size();
+          int outq = producer_ ? rd_kafka_outq_len(producer_) : -1;
+          LOG(INFO) << "KafkaSender " << id_ << " stats: queue=" << qsize
+                    << " outq=" << outq << " elements=" << elements_;
+          last_metrics = now;
+        }
         continue;
       }
       record = queue_.front();
@@ -151,6 +160,18 @@ void* KafkaSender::ThreadMain() {
     }
 
     rd_kafka_poll(producer_, 0);
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_metrics >= std::chrono::seconds(5)) {
+      size_t qsize = 0;
+      {
+        std::lock_guard lock(queue_mutex_);
+        qsize = queue_.size();
+      }
+      int outq = producer_ ? rd_kafka_outq_len(producer_) : -1;
+      LOG(INFO) << "KafkaSender " << id_ << " stats: queue=" << qsize
+                << " outq=" << outq << " elements=" << elements_;
+      last_metrics = now;
+    }
   }
 
   rd_kafka_poll(producer_, 0);
