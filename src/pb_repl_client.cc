@@ -440,12 +440,13 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
           if (ret != 0) {
             LOG(WARNING) << "pb repl: publish binlog event failed, ret=" << ret;
           } else {
+            Offset ack_offset;
+            ack_offset.filenum = binlog_res.binlog_offset().filenum();
+            ack_offset.offset = binlog_res.binlog_offset().offset();
             if (!has_batch_end) {
-              batch_start.filenum = binlog_item.filenum();
-              batch_start.offset = binlog_item.offset();
+              batch_start = ack_offset;
             }
-            batch_end.filenum = binlog_item.filenum();
-            batch_end.offset = binlog_item.offset();
+            batch_end = ack_offset;
             has_batch_end = true;
           }
         }
