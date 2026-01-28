@@ -269,6 +269,23 @@ bool PbReplClient::OffsetNewer(const Offset& a, const Offset& b) {
   return false;
 }
 
+void PbReplClient::UpdateProcessedOffset(const Offset& offset) {
+  std::lock_guard<std::mutex> lock(processed_mu_);
+  if (!has_processed_ || OffsetNewer(offset, last_processed_)) {
+    last_processed_ = offset;
+    has_processed_ = true;
+  }
+}
+
+bool PbReplClient::GetProcessedOffset(Offset* out) {
+  std::lock_guard<std::mutex> lock(processed_mu_);
+  if (!has_processed_) {
+    return false;
+  }
+  *out = last_processed_;
+  return true;
+}
+
 bool PbReplClient::LoadBgsaveInfo(Offset* offset) {
   std::string info_path = BuildDumpPath(g_conf.dump_path, g_conf.db_name);
   if (info_path.back() != '/') {
@@ -348,6 +365,7 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
   if (!SendBinlogSyncAck(start_offset, session_id, true)) {
     return false;
   }
+  UpdateProcessedOffset(start_offset);
   StartAckKeepalive(session_id, start_offset);
 
   while (!should_stop_.load()) {
@@ -366,6 +384,8 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
       if (response.type() == InnerMessage::kBinlogSync) {
         bool matched_session = false;
         bool logged_mismatch = false;
+        Offset batch_end;
+        bool has_batch_end = false;
         for (int i = 0; i < response.binlog_sync_size(); ++i) {
           const auto& binlog_res = response.binlog_sync(i);
           if (binlog_res.session_id() != session_id) {
@@ -415,7 +435,14 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
           int ret = pika_port_->PublishBinlogEvent(argv, binlog_item, command, key);
           if (ret != 0) {
             LOG(WARNING) << "pb repl: publish binlog event failed, ret=" << ret;
+          } else {
+            batch_end.filenum = binlog_item.filenum();
+            batch_end.offset = binlog_item.offset();
+            has_batch_end = true;
           }
+        }
+        if (has_batch_end) {
+          UpdateProcessedOffset(batch_end);
         }
         if (matched_session) {
           last_binlog_time = now;
@@ -427,11 +454,10 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
       }
     }
 
-    Checkpoint cp;
     Offset committed = last_sent_ack;
-    if (pika_port_->checkpoint_manager()->GetLast(&cp)) {
-      committed.filenum = cp.filenum;
-      committed.offset = cp.offset;
+    Offset processed;
+    if (GetProcessedOffset(&processed) && OffsetNewer(processed, committed)) {
+      committed = processed;
     }
     auto ms_since = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_ack_time).count();
     if (g_conf.pb_ack_delay_warn_ms > 0 && ms_since >= g_conf.pb_ack_delay_warn_ms) {
@@ -575,10 +601,9 @@ void PbReplClient::AckKeepaliveLoop() {
     lock.unlock();
 
     Offset committed = last_sent;
-    Checkpoint cp;
-    if (pika_port_->checkpoint_manager()->GetLast(&cp)) {
-      committed.filenum = cp.filenum;
-      committed.offset = cp.offset;
+    Offset processed;
+    if (GetProcessedOffset(&processed) && OffsetNewer(processed, committed)) {
+      committed = processed;
     }
     if (OffsetNewer(last_sent, committed)) {
       committed = last_sent;

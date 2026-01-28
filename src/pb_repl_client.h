@@ -42,6 +42,8 @@ class PbReplClient {
   bool LoadBgsaveInfo(Offset* offset);
   Offset GetStartOffset() const;
   void UpdateLoggerOffset(const Offset& offset);
+  void UpdateProcessedOffset(const Offset& offset);
+  bool GetProcessedOffset(Offset* out);
   void StartAckKeepalive(int32_t session_id, const Offset& start_offset);
   void StopAckKeepalive();
   void AckKeepaliveLoop();
@@ -55,6 +57,9 @@ class PbReplClient {
   std::unique_ptr<net::NetCli> repl_cli_;
   std::string local_ip_;
   std::mutex repl_send_mu_;
+  std::mutex processed_mu_;
+  Offset last_processed_;
+  bool has_processed_{false};
 
   std::atomic<bool> ack_stop_{false};
   std::thread ack_thread_;
