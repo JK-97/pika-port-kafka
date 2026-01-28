@@ -149,18 +149,22 @@ bool PbReplClient::SendTrySync(const Offset& offset, int32_t* session_id, int* r
   }
 
   InnerMessage::InnerResponse response;
-  s = repl_cli_->Recv(&response);
-  if (!s.ok()) {
-    LOG(WARNING) << "pb repl: recv TrySync failed " << s.ToString();
-    return false;
-  }
-  if (response.type() != InnerMessage::kTrySync) {
-    LOG(WARNING) << "pb repl: unexpected TrySync response type";
-    return false;
-  }
-  if (!response.has_try_sync()) {
-    LOG(WARNING) << "pb repl: TrySync response missing";
-    return false;
+  int unexpected = 0;
+  const int kMaxUnexpected = 10;
+  while (true) {
+    s = repl_cli_->Recv(&response);
+    if (!s.ok()) {
+      LOG(WARNING) << "pb repl: recv TrySync failed " << s.ToString();
+      return false;
+    }
+    if (response.type() == InnerMessage::kTrySync && response.has_try_sync()) {
+      break;
+    }
+    if (++unexpected >= kMaxUnexpected) {
+      LOG(WARNING) << "pb repl: unexpected TrySync response type, exceeded retries";
+      return false;
+    }
+    LOG(WARNING) << "pb repl: unexpected TrySync response type, waiting for TrySync";
   }
   const auto& try_sync_resp = response.try_sync();
   *reply_code = try_sync_resp.reply_code();
