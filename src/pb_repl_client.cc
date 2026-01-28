@@ -331,6 +331,7 @@ bool PbReplClient::PerformFullSync(Offset* new_offset) {
 bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t session_id) {
   Offset last_sent_ack = start_offset;
   auto last_ack_time = std::chrono::steady_clock::now();
+  auto last_warn_time = std::chrono::steady_clock::now();
   if (!SendBinlogSyncAck(start_offset, session_id, true)) {
     return false;
   }
@@ -399,6 +400,16 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
     }
     auto now = std::chrono::steady_clock::now();
     auto ms_since = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_ack_time).count();
+    if (g_conf.pb_ack_delay_warn_ms > 0 && ms_since >= g_conf.pb_ack_delay_warn_ms) {
+      auto warn_since = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_warn_time).count();
+      if (warn_since >= g_conf.pb_ack_delay_warn_ms) {
+        LOG(WARNING) << "pb repl: ack delay " << ms_since << "ms"
+                     << " session_id=" << session_id
+                     << " last_ack=" << last_sent_ack.filenum << ":" << last_sent_ack.offset
+                     << " committed=" << committed.filenum << ":" << committed.offset;
+        last_warn_time = now;
+      }
+    }
     if (OffsetNewer(committed, last_sent_ack) || ms_since >= kAckIntervalMs) {
       SendBinlogSyncAck(committed, session_id, false);
       last_sent_ack = committed;
