@@ -337,6 +337,7 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
   Offset last_sent_ack = start_offset;
   auto last_ack_time = std::chrono::steady_clock::now();
   auto last_warn_time = std::chrono::steady_clock::now();
+  auto last_recv_time = std::chrono::steady_clock::now();
   if (!SendBinlogSyncAck(start_offset, session_id, true)) {
     return false;
   }
@@ -345,55 +346,60 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
   while (!should_stop_.load()) {
     InnerMessage::InnerResponse response;
     pstd::Status s = repl_cli_->Recv(&response);
+    auto now = std::chrono::steady_clock::now();
     if (!s.ok()) {
       if (s.IsTimeout()) {
         // keep alive and ack if checkpoint advanced
       } else {
         LOG(WARNING) << "pb repl: binlog recv failed " << s.ToString();
+        StopAckKeepalive();
         return false;
       }
-    } else if (response.type() == InnerMessage::kBinlogSync) {
-      for (int i = 0; i < response.binlog_sync_size(); ++i) {
-        const auto& binlog_res = response.binlog_sync(i);
-        if (binlog_res.session_id() != session_id) {
-          continue;
-        }
-        BinlogItem binlog_item;
-        if (!PikaBinlogTransverter::BinlogDecode(TypeFirst, binlog_res.binlog(), &binlog_item)) {
-          LOG(WARNING) << "pb repl: binlog decode failed";
-          continue;
-        }
-        net::RedisCmdArgsType argv;
-        if (ParseRedisRESPArray(binlog_item.content(), &argv) != kRespOk) {
-          LOG(WARNING) << "pb repl: parse redis resp failed";
-          continue;
-        }
-        if (argv.empty()) {
-          continue;
-        }
-        std::string key;
-        if (argv.size() > 1) {
-          key = argv[1];
-        }
-        std::string command = binlog_item.content();
-        if (argv[0] == "pksetexat" && argv.size() > 2) {
-          std::string temp = argv[2];
-          unsigned long int sec = time(nullptr);
-          unsigned long int tot = std::stol(temp) - sec;
-          std::string time_out = std::to_string(tot);
-          command.erase(0, 4);
-          command.replace(0, 13, "*4\r\n$5\r\nsetex");
-          int start = 13 + 3 + std::to_string(key.size()).size() + 2 + static_cast<int>(key.size()) + 3;
-          int old_time_size = static_cast<int>(std::to_string(temp.size()).size() + 2 + temp.size());
-          int new_time_size = static_cast<int>(std::to_string(time_out.size()).size() + 2 + time_out.size());
-          int diff = old_time_size - new_time_size;
-          command.erase(start, diff);
-          std::string time_cmd = std::to_string(time_out.size()) + "\r\n" + time_out;
-          command.replace(start, new_time_size, time_cmd);
-        }
-        int ret = pika_port_->PublishBinlogEvent(argv, binlog_item, command, key);
-        if (ret != 0) {
-          LOG(WARNING) << "pb repl: publish binlog event failed, ret=" << ret;
+    } else {
+      last_recv_time = now;
+      if (response.type() == InnerMessage::kBinlogSync) {
+        for (int i = 0; i < response.binlog_sync_size(); ++i) {
+          const auto& binlog_res = response.binlog_sync(i);
+          if (binlog_res.session_id() != session_id) {
+            continue;
+          }
+          BinlogItem binlog_item;
+          if (!PikaBinlogTransverter::BinlogDecode(TypeFirst, binlog_res.binlog(), &binlog_item)) {
+            LOG(WARNING) << "pb repl: binlog decode failed";
+            continue;
+          }
+          net::RedisCmdArgsType argv;
+          if (ParseRedisRESPArray(binlog_item.content(), &argv) != kRespOk) {
+            LOG(WARNING) << "pb repl: parse redis resp failed";
+            continue;
+          }
+          if (argv.empty()) {
+            continue;
+          }
+          std::string key;
+          if (argv.size() > 1) {
+            key = argv[1];
+          }
+          std::string command = binlog_item.content();
+          if (argv[0] == "pksetexat" && argv.size() > 2) {
+            std::string temp = argv[2];
+            unsigned long int sec = time(nullptr);
+            unsigned long int tot = std::stol(temp) - sec;
+            std::string time_out = std::to_string(tot);
+            command.erase(0, 4);
+            command.replace(0, 13, "*4\r\n$5\r\nsetex");
+            int start = 13 + 3 + std::to_string(key.size()).size() + 2 + static_cast<int>(key.size()) + 3;
+            int old_time_size = static_cast<int>(std::to_string(temp.size()).size() + 2 + temp.size());
+            int new_time_size = static_cast<int>(std::to_string(time_out.size()).size() + 2 + time_out.size());
+            int diff = old_time_size - new_time_size;
+            command.erase(start, diff);
+            std::string time_cmd = std::to_string(time_out.size()) + "\r\n" + time_out;
+            command.replace(start, new_time_size, time_cmd);
+          }
+          int ret = pika_port_->PublishBinlogEvent(argv, binlog_item, command, key);
+          if (ret != 0) {
+            LOG(WARNING) << "pb repl: publish binlog event failed, ret=" << ret;
+          }
         }
       }
     }
@@ -404,7 +410,6 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
       committed.filenum = cp.filenum;
       committed.offset = cp.offset;
     }
-    auto now = std::chrono::steady_clock::now();
     auto ms_since = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_ack_time).count();
     if (g_conf.pb_ack_delay_warn_ms > 0 && ms_since >= g_conf.pb_ack_delay_warn_ms) {
       auto warn_since = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_warn_time).count();
@@ -414,6 +419,17 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
                      << " last_ack=" << last_sent_ack.filenum << ":" << last_sent_ack.offset
                      << " committed=" << committed.filenum << ":" << committed.offset;
         last_warn_time = now;
+      }
+    }
+    if (g_conf.pb_idle_timeout_ms > 0) {
+      auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_recv_time).count();
+      if (idle_ms >= g_conf.pb_idle_timeout_ms) {
+        LOG(WARNING) << "pb repl: idle " << idle_ms << "ms without binlog response, reconnecting"
+                     << " session_id=" << session_id
+                     << " last_ack=" << last_sent_ack.filenum << ":" << last_sent_ack.offset
+                     << " committed=" << committed.filenum << ":" << committed.offset;
+        StopAckKeepalive();
+        return false;
       }
     }
     if (OffsetNewer(committed, last_sent_ack) || ms_since >= kAckIntervalMs) {

@@ -131,6 +131,7 @@ void Usage() {
   std::cout << "\t-H     -- heartbeat log interval seconds (OPTIONAL default: 60, min: 1, 0 disables)" << std::endl;
   std::cout << "\t-J     -- kafka producer message.max.bytes (OPTIONAL default: 1000000)" << std::endl;
   std::cout << "\t-A     -- pb ack delay warn seconds (OPTIONAL default: 10, min: 1, 0 disables)" << std::endl;
+  std::cout << "\t-I     -- pb idle reconnect seconds (OPTIONAL default: 30, min: 1, 0 disables)" << std::endl;
   std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 "
                "-k 127.0.0.1:9092 -M dual -S pika.snapshot -B pika.binlog -O __pika_port_kafka_offsets "
                "-x 4 -R auto -l ./log -r ./rsync_dump -b 512 -E true"
@@ -166,6 +167,7 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Heartbeat_interval_ms:" << g_conf.heartbeat_interval_ms << std::endl;
   std::cout << "Kafka_message_max_bytes:" << g_conf.kafka_message_max_bytes << std::endl;
   std::cout << "Pb_ack_delay_warn_ms:" << g_conf.pb_ack_delay_warn_ms << std::endl;
+  std::cout << "Pb_idle_timeout_ms:" << g_conf.pb_idle_timeout_ms << std::endl;
   std::cout << "Startup Time : " << asctime(localtime(&now));
   std::cout << "========================================================" << std::endl;
 }
@@ -180,7 +182,7 @@ int main(int argc, char* argv[]) {
   char buf[1024];
   bool is_daemon = false;
   long num = 0;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:z:b:H:J:A:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
+  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:z:b:H:J:A:I:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -318,6 +320,15 @@ int main(int argc, char* argv[]) {
           g_conf.pb_ack_delay_warn_ms = static_cast<int64_t>(num) * 1000;
         }
         break;
+      case 'I':
+        snprintf(buf, 1024, "%s", optarg);
+        pstd::string2int(buf, strlen(buf), &(num));
+        if (num <= 0) {
+          g_conf.pb_idle_timeout_ms = 0;
+        } else {
+          g_conf.pb_idle_timeout_ms = static_cast<int64_t>(num) * 1000;
+        }
+        break;
       case 'e':
         g_conf.exit_if_dbsync = true;
         break;
@@ -335,8 +346,10 @@ int main(int argc, char* argv[]) {
 
   const int64_t kMinHeartbeatIntervalMs = 1000;
   const int64_t kMinAckDelayWarnMs = 1000;
+  const int64_t kMinIdleTimeoutMs = 1000;
   bool heartbeat_clamped = false;
   bool ack_delay_clamped = false;
+  bool idle_timeout_clamped = false;
   if (g_conf.heartbeat_interval_ms > 0 && g_conf.heartbeat_interval_ms < kMinHeartbeatIntervalMs) {
     g_conf.heartbeat_interval_ms = kMinHeartbeatIntervalMs;
     heartbeat_clamped = true;
@@ -345,6 +358,10 @@ int main(int argc, char* argv[]) {
     g_conf.pb_ack_delay_warn_ms = kMinAckDelayWarnMs;
     ack_delay_clamped = true;
   }
+  if (g_conf.pb_idle_timeout_ms > 0 && g_conf.pb_idle_timeout_ms < kMinIdleTimeoutMs) {
+    g_conf.pb_idle_timeout_ms = kMinIdleTimeoutMs;
+    idle_timeout_clamped = true;
+  }
 
   GlogInit(g_conf.log_path, is_daemon);
   if (heartbeat_clamped) {
@@ -352,6 +369,9 @@ int main(int argc, char* argv[]) {
   }
   if (ack_delay_clamped) {
     LOG(WARNING) << "PB ack delay warn interval too small, set to " << g_conf.pb_ack_delay_warn_ms << "ms";
+  }
+  if (idle_timeout_clamped) {
+    LOG(WARNING) << "PB idle reconnect interval too small, set to " << g_conf.pb_idle_timeout_ms << "ms";
   }
   if (g_conf.source_id.empty()) {
     g_conf.source_id = g_conf.master_ip + ":" + std::to_string(g_conf.master_port);

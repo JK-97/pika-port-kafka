@@ -34,6 +34,7 @@ class Conf {
     kafka_message_max_bytes = 1000000;
     kafka_sender_threads = 1;
     pb_ack_delay_warn_ms = 10000;
+    pb_idle_timeout_ms = 30000;
   }
 
  public:
@@ -66,6 +67,7 @@ class Conf {
   int64_t kafka_message_max_bytes;
   int kafka_sender_threads;
   int64_t pb_ack_delay_warn_ms;
+  int64_t pb_idle_timeout_ms;
 };
 
 extern Conf g_conf;
