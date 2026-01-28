@@ -106,6 +106,10 @@ void Usage() {
   std::cout << "\t-i     -- master ip(OPTIONAL default: 127.0.0.1)" << std::endl;
   std::cout << "\t-o     -- master port(REQUIRED)" << std::endl;
   std::cout << "\t-x     -- kafka sender threads(OPTIONAL default: 1)" << std::endl;
+  std::cout << "\t-Q     -- kafka sender stats interval seconds (OPTIONAL default: 5, min: 1, 0 disables)"
+            << std::endl;
+  std::cout << "\t-q     -- kafka sender stats backlog threshold (OPTIONAL default: 0, 0 logs always)"
+            << std::endl;
   std::cout << "\t-z     -- max timeout duration for waiting pika master bgsave data (OPTIONAL default 1800s)"
             << std::endl;
   std::cout << "\t-f     -- binlog filenum(OPTIONAL default: local offset)" << std::endl;
@@ -145,6 +149,8 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Master_ip:" << g_conf.master_ip << std::endl;
   std::cout << "Master_port:" << g_conf.master_port << std::endl;
   std::cout << "Kafka_sender_threads:" << g_conf.kafka_sender_threads << std::endl;
+  std::cout << "Kafka_stats_interval_ms:" << g_conf.kafka_stats_interval_ms << std::endl;
+  std::cout << "Kafka_stats_backlog_threshold:" << g_conf.kafka_stats_backlog_threshold << std::endl;
   std::cout << "Wait_bgsave_timeout:" << g_conf.wait_bgsave_timeout << std::endl;
   std::cout << "Log_path:" << g_conf.log_path << std::endl;
   std::cout << "Dump_path:" << g_conf.dump_path << std::endl;
@@ -184,7 +190,7 @@ int main(int argc, char* argv[]) {
   long num = 0;
   bool filenum_specified = false;
   bool offset_specified = false;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:z:b:H:J:A:I:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
+  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:Q:q:z:b:H:J:A:I:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -208,6 +214,24 @@ int main(int argc, char* argv[]) {
         snprintf(buf, 1024, "%s", optarg);
         pstd::string2int(buf, strlen(buf), &(num));
         g_conf.kafka_sender_threads = static_cast<int>(num);
+        break;
+      case 'Q':
+        snprintf(buf, 1024, "%s", optarg);
+        pstd::string2int(buf, strlen(buf), &(num));
+        if (num <= 0) {
+          g_conf.kafka_stats_interval_ms = 0;
+        } else {
+          g_conf.kafka_stats_interval_ms = static_cast<int64_t>(num) * 1000;
+        }
+        break;
+      case 'q':
+        snprintf(buf, 1024, "%s", optarg);
+        pstd::string2int(buf, strlen(buf), &(num));
+        if (num <= 0) {
+          g_conf.kafka_stats_backlog_threshold = 0;
+        } else {
+          g_conf.kafka_stats_backlog_threshold = static_cast<size_t>(num);
+        }
         break;
       case 'z':
         snprintf(buf, 1024, "%s", optarg);
@@ -349,14 +373,20 @@ int main(int argc, char* argv[]) {
   }
 
   const int64_t kMinHeartbeatIntervalMs = 1000;
+  const int64_t kMinKafkaStatsIntervalMs = 1000;
   const int64_t kMinAckDelayWarnMs = 1000;
   const int64_t kMinIdleTimeoutMs = 1000;
   bool heartbeat_clamped = false;
+  bool kafka_stats_clamped = false;
   bool ack_delay_clamped = false;
   bool idle_timeout_clamped = false;
   if (g_conf.heartbeat_interval_ms > 0 && g_conf.heartbeat_interval_ms < kMinHeartbeatIntervalMs) {
     g_conf.heartbeat_interval_ms = kMinHeartbeatIntervalMs;
     heartbeat_clamped = true;
+  }
+  if (g_conf.kafka_stats_interval_ms > 0 && g_conf.kafka_stats_interval_ms < kMinKafkaStatsIntervalMs) {
+    g_conf.kafka_stats_interval_ms = kMinKafkaStatsIntervalMs;
+    kafka_stats_clamped = true;
   }
   if (g_conf.pb_ack_delay_warn_ms > 0 && g_conf.pb_ack_delay_warn_ms < kMinAckDelayWarnMs) {
     g_conf.pb_ack_delay_warn_ms = kMinAckDelayWarnMs;
@@ -370,6 +400,9 @@ int main(int argc, char* argv[]) {
   GlogInit(g_conf.log_path, is_daemon);
   if (heartbeat_clamped) {
     LOG(WARNING) << "Heartbeat interval too small, set to " << g_conf.heartbeat_interval_ms << "ms";
+  }
+  if (kafka_stats_clamped) {
+    LOG(WARNING) << "Kafka stats interval too small, set to " << g_conf.kafka_stats_interval_ms << "ms";
   }
   if (ack_delay_clamped) {
     LOG(WARNING) << "PB ack delay warn interval too small, set to " << g_conf.pb_ack_delay_warn_ms << "ms";

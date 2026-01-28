@@ -33,6 +33,8 @@ class Conf {
     heartbeat_interval_ms = 60000;
     kafka_message_max_bytes = 1000000;
     kafka_sender_threads = 1;
+    kafka_stats_interval_ms = 5000;
+    kafka_stats_backlog_threshold = 0;
     pb_ack_delay_warn_ms = 10000;
     pb_idle_timeout_ms = 30000;
   }
@@ -66,6 +68,8 @@ class Conf {
   int64_t heartbeat_interval_ms;
   int64_t kafka_message_max_bytes;
   int kafka_sender_threads;
+  int64_t kafka_stats_interval_ms;
+  size_t kafka_stats_backlog_threshold;
   int64_t pb_ack_delay_warn_ms;
   int64_t pb_idle_timeout_ms;
 };

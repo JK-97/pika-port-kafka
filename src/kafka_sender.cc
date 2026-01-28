@@ -116,6 +116,28 @@ void* KafkaSender::ThreadMain() {
   }
 
   auto last_metrics = std::chrono::steady_clock::now();
+  const auto stats_interval = std::chrono::milliseconds(conf_.kafka_stats_interval_ms);
+  const size_t stats_backlog_threshold = conf_.kafka_stats_backlog_threshold;
+  auto maybe_log_stats = [&](size_t qsize) {
+    if (conf_.kafka_stats_interval_ms <= 0) {
+      return;
+    }
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_metrics < stats_interval) {
+      return;
+    }
+    int outq = producer_ ? rd_kafka_outq_len(producer_) : -1;
+    if (stats_backlog_threshold > 0) {
+      if (qsize < stats_backlog_threshold &&
+          (outq < 0 || outq < static_cast<int>(stats_backlog_threshold))) {
+        last_metrics = now;
+        return;
+      }
+    }
+    LOG(INFO) << "KafkaSender " << id_ << " stats: queue=" << qsize
+              << " outq=" << outq << " elements=" << elements_;
+    last_metrics = now;
+  };
   while (!should_exit_) {
     KafkaRecord record;
     {
@@ -124,14 +146,7 @@ void* KafkaSender::ThreadMain() {
                              [this]() { return should_exit_.load() || !queue_.empty(); });
       if (queue_.empty()) {
         rd_kafka_poll(producer_, 0);
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_metrics >= std::chrono::seconds(5)) {
-          size_t qsize = queue_.size();
-          int outq = producer_ ? rd_kafka_outq_len(producer_) : -1;
-          LOG(INFO) << "KafkaSender " << id_ << " stats: queue=" << qsize
-                    << " outq=" << outq << " elements=" << elements_;
-          last_metrics = now;
-        }
+        maybe_log_stats(queue_.size());
         continue;
       }
       record = queue_.front();
@@ -160,18 +175,12 @@ void* KafkaSender::ThreadMain() {
     }
 
     rd_kafka_poll(producer_, 0);
-    auto now = std::chrono::steady_clock::now();
-    if (now - last_metrics >= std::chrono::seconds(5)) {
-      size_t qsize = 0;
-      {
-        std::lock_guard lock(queue_mutex_);
-        qsize = queue_.size();
-      }
-      int outq = producer_ ? rd_kafka_outq_len(producer_) : -1;
-      LOG(INFO) << "KafkaSender " << id_ << " stats: queue=" << qsize
-                << " outq=" << outq << " elements=" << elements_;
-      last_metrics = now;
+    size_t qsize = 0;
+    {
+      std::lock_guard lock(queue_mutex_);
+      qsize = queue_.size();
     }
+    maybe_log_stats(qsize);
   }
 
   rd_kafka_poll(producer_, 0);
