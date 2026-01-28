@@ -65,6 +65,10 @@ bool KafkaSender::InitProducer() {
   rd_kafka_conf_set(conf, "acks", "all", errstr, sizeof(errstr));
   rd_kafka_conf_set(conf, "enable.idempotence", conf_.kafka_enable_idempotence ? "true" : "false", errstr, sizeof(errstr));
   rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", "1", errstr, sizeof(errstr));
+  if (conf_.kafka_message_max_bytes > 0) {
+    std::string max_bytes = std::to_string(conf_.kafka_message_max_bytes);
+    rd_kafka_conf_set(conf, "message.max.bytes", max_bytes.c_str(), errstr, sizeof(errstr));
+  }
 
   rd_kafka_conf_set_dr_msg_cb(conf, &KafkaSender::DeliveryReportCallback);
 

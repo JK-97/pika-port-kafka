@@ -70,6 +70,7 @@
 - `-d` daemon 模式（可选）
 - `-e` 若遇到 dbsync wait 立即退出（可选）
 - `-H` 心跳日志间隔秒数（默认 `60`，最小 `1`，`0` 关闭）
+- `-J` Kafka producer `message.max.bytes`（默认 `1000000`）
 
 说明：
 

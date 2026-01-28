@@ -34,6 +34,7 @@ class Conf {
     kafka_stream_mode = "dual";
     sync_protocol = "auto";
     heartbeat_interval_ms = 60000;
+    kafka_message_max_bytes = 1000000;
   }
 
  public:
@@ -67,6 +68,7 @@ class Conf {
   std::string kafka_stream_mode;
   std::string sync_protocol;
   int64_t heartbeat_interval_ms;
+  int64_t kafka_message_max_bytes;
 };
 
 extern Conf g_conf;
