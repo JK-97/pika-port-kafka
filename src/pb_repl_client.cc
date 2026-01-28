@@ -341,7 +341,10 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
   Offset last_sent_ack = start_offset;
   auto last_ack_time = std::chrono::steady_clock::now();
   auto last_warn_time = std::chrono::steady_clock::now();
-  auto last_recv_time = std::chrono::steady_clock::now();
+  auto last_binlog_time = std::chrono::steady_clock::now();
+  auto last_non_binlog_log = last_binlog_time;
+  auto last_session_mismatch_log = last_binlog_time;
+  const auto log_throttle = std::chrono::milliseconds(5000);
   if (!SendBinlogSyncAck(start_offset, session_id, true)) {
     return false;
   }
@@ -360,13 +363,22 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
         return false;
       }
     } else {
-      last_recv_time = now;
       if (response.type() == InnerMessage::kBinlogSync) {
+        bool matched_session = false;
+        bool logged_mismatch = false;
         for (int i = 0; i < response.binlog_sync_size(); ++i) {
           const auto& binlog_res = response.binlog_sync(i);
           if (binlog_res.session_id() != session_id) {
+            if (!logged_mismatch && now - last_session_mismatch_log >= log_throttle) {
+              LOG(WARNING) << "pb repl: binlog session mismatch"
+                           << " expected=" << session_id
+                           << " got=" << binlog_res.session_id();
+              last_session_mismatch_log = now;
+              logged_mismatch = true;
+            }
             continue;
           }
+          matched_session = true;
           BinlogItem binlog_item;
           if (!PikaBinlogTransverter::BinlogDecode(TypeFirst, binlog_res.binlog(), &binlog_item)) {
             LOG(WARNING) << "pb repl: binlog decode failed";
@@ -405,6 +417,13 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
             LOG(WARNING) << "pb repl: publish binlog event failed, ret=" << ret;
           }
         }
+        if (matched_session) {
+          last_binlog_time = now;
+        }
+      } else if (now - last_non_binlog_log >= log_throttle) {
+        LOG(WARNING) << "pb repl: unexpected response type while waiting binlog sync"
+                     << " type=" << static_cast<int>(response.type());
+        last_non_binlog_log = now;
       }
     }
 
@@ -426,7 +445,7 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
       }
     }
     if (g_conf.pb_idle_timeout_ms > 0) {
-      auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_recv_time).count();
+      auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_binlog_time).count();
       if (idle_ms >= g_conf.pb_idle_timeout_ms) {
         LOG(WARNING) << "pb repl: idle " << idle_ms << "ms without binlog response, reconnecting"
                      << " session_id=" << session_id
