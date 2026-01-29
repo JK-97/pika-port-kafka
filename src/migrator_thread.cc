@@ -1,6 +1,7 @@
 #include "migrator_thread.h"
 #include "const.h"
 #include "event_builder.h"
+#include "event_filter.h"
 
 #include <unistd.h>
 
@@ -8,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <type_traits>
+#include <string_view>
 #include <vector>
 
 #include "net/include/redis_cli.h"
@@ -86,6 +88,20 @@ std::string DataTypeName(int type) {
   }
 }
 
+bool ShouldSendSnapshotEvent(const net::RedisCmdArgsType& argv,
+                             const std::string& data_type,
+                             const std::string& key) {
+  const EventFilter* filter = g_conf.event_filter.get();
+  if (!filter) {
+    return true;
+  }
+  std::string_view action;
+  if (!argv.empty()) {
+    action = argv[0];
+  }
+  return filter->ShouldSend(key, data_type, action);
+}
+
 KafkaRecord MakeSnapshotRecord(const net::RedisCmdArgsType& argv,
                                const std::string& data_type,
                                const std::string& key,
@@ -108,6 +124,7 @@ MigratorThread::~MigratorThread() = default;
 
 void MigratorThread::MigrateStringsDB() {
   auto* db = db_;
+  const std::string data_type = DataTypeName(type_);
   std::string pattern("*");
   int64_t cursor = 0;
   int64_t batch_count = ScanBatchCount();
@@ -143,8 +160,11 @@ void MigratorThread::MigrateStringsDB() {
         argv.push_back(std::to_string(ttl));
       }
 
+      if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+        continue;
+      }
       net::SerializeRedisCommand(argv, &cmd);
-      KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+      KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
       PlusNum();
       DispatchRecord(record);
     }
@@ -153,6 +173,7 @@ void MigratorThread::MigrateStringsDB() {
 
 void MigratorThread::MigrateListsDB() {
   auto* db = db_;
+  const std::string data_type = DataTypeName(type_);
   std::string pattern("*");
   int64_t cursor = 0;
   int64_t batch_count = ScanBatchCount();
@@ -188,8 +209,11 @@ void MigratorThread::MigrateListsDB() {
           argv.push_back(e);
         }
 
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          break;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
 
@@ -210,8 +234,11 @@ void MigratorThread::MigrateListsDB() {
         argv.push_back("EXPIRE");
         argv.push_back(k);
         argv.push_back(std::to_string(ttl));
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          continue;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
       }
@@ -221,6 +248,7 @@ void MigratorThread::MigrateListsDB() {
 
 void MigratorThread::MigrateHashesDB() {
   auto* db = db_;
+  const std::string data_type = DataTypeName(type_);
   std::string pattern("*");
   int64_t cursor = 0;
   int64_t batch_count = ScanBatchCount();
@@ -256,8 +284,11 @@ void MigratorThread::MigrateHashesDB() {
           argv.push_back(it->value);
         }
 
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          break;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
       }
@@ -270,8 +301,11 @@ void MigratorThread::MigrateHashesDB() {
         argv.push_back("EXPIRE");
         argv.push_back(k);
         argv.push_back(std::to_string(ttl));
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          continue;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
       }
@@ -281,6 +315,7 @@ void MigratorThread::MigrateHashesDB() {
 
 void MigratorThread::MigrateSetsDB() {
   auto* db = db_;
+  const std::string data_type = DataTypeName(type_);
   std::string pattern("*");
   int64_t cursor = 0;
   int64_t batch_count = ScanBatchCount();
@@ -314,8 +349,11 @@ void MigratorThread::MigrateSetsDB() {
           argv.push_back(*it);
         }
 
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          break;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
       }
@@ -328,8 +366,11 @@ void MigratorThread::MigrateSetsDB() {
         argv.push_back("EXPIRE");
         argv.push_back(k);
         argv.push_back(std::to_string(ttl));
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          continue;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
       }
@@ -339,6 +380,7 @@ void MigratorThread::MigrateSetsDB() {
 
 void MigratorThread::MigrateZsetsDB() {
   auto* db = db_;
+  const std::string data_type = DataTypeName(type_);
   std::string pattern("*");
   int64_t cursor = 0;
   int64_t batch_count = ScanBatchCount();
@@ -377,8 +419,11 @@ void MigratorThread::MigrateZsetsDB() {
           argv.push_back(sm.member);
         }
 
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          break;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
 
@@ -400,8 +445,11 @@ void MigratorThread::MigrateZsetsDB() {
         argv.push_back("EXPIRE");
         argv.push_back(k);
         argv.push_back(std::to_string(ttl));
+        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+          continue;
+        }
         net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, DataTypeName(type_), k, cmd);
+        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
         PlusNum();
         DispatchRecord(record);
       }

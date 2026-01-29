@@ -56,3 +56,6 @@ dkms.conf
 
 # build files
 build/
+
+# local filter config
+filters.conf

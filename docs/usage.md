@@ -75,14 +75,45 @@
 - `-J` Kafka producer `message.max.bytes`（默认 `1000000`）
 - `-A` PB ack 延迟告警秒数（默认 `10`，最小 `1`，`0` 关闭）
 - `-I` PB 空闲自动重连秒数（默认 `30`，最小 `1`，`0` 关闭）
+- `-F` 事件过滤规则组（可重复）
+- `-X` 全局 exclude key 规则（逗号分隔）
 
 说明：
 
 - `-R auto` 会优先探测 PB 复制端口，失败则回退 legacy。
 
-## 4. 示例
+## 4. 事件过滤
 
-### 4.1 dual 模式（snapshot + binlog）
+过滤仅影响是否发送到 Kafka，不阻塞同步进度（checkpoint 仍推进）。默认不配置时全量发送。
+
+规则语义：
+
+- 组内：`key` + `type` + `action` 为 AND 关系
+- 组间：OR 关系（命中任一组即通过）
+- 全局 exclude：优先级最高，命中即丢弃
+
+配置方式：
+
+- `-F "key=dev:*;type=list;action=lpush"`
+- `-F "key=prod:*;type=list,set;action=rpush"`
+- `-F /path/to/filters.conf`（文件中一行一个规则组，支持空行和 `#` 注释）
+- `-X "tmp:*,bad:*"`（全局 exclude）
+
+key 规则：
+
+- 以 `*` 结尾且不含其它正则元字符时视为前缀（如 `dev:*`）
+- 包含正则元字符（如 `.` `+` `[]` `()` `|` `^` `$` 等）时按正则处理
+- 既无 `*` 也无正则元字符时为精确匹配
+
+type/action 来源：
+
+- `type`：`string|hash|list|set|zset|unknown`
+- `action`：Redis 命令名（大小写不敏感，例如 `lpush`、`rpush`、`expire`）
+- 若 type/action 无法识别，则默认放行（不因该条件过滤）
+
+## 5. 示例
+
+### 5.1 dual 模式（snapshot + binlog）
 
 ```bash
 ./build/pika_port \
@@ -94,7 +125,7 @@
   -l ./log -r ./rsync_dump
 ```
 
-### 4.2 single 模式（单流顺序消费）
+### 5.2 single 模式（单流顺序消费）
 
 ```bash
 ./build/pika_port \
@@ -106,13 +137,13 @@
   -l ./log -r ./rsync_dump
 ```
 
-## 5. 断点恢复与重跑
+## 6. 断点恢复与重跑
 
 - 默认会读取 `checkpoint.json` 与 offsets topic 中的最新位置。
 - 若要从头全量：删除 checkpoint 文件，并清理 offsets topic 中对应 `source_id` 的记录。
 - 若要指定位置：使用 `-f <filenum> -s <offset>`。
 
-## 6. 运行状态判断
+## 7. 运行状态判断
 
 日志默认输出到 `./log/`，启动后应看到：
 

@@ -11,18 +11,39 @@
 #include <cassert>
 #include <chrono>
 #include <memory>
+#include <string_view>
 
 #include <glog/logging.h>
 #include <functional>
 
 #include "conf.h"
 #include "const.h"
+#include "event_filter.h"
 #include "event_builder.h"
 #include "net/include/net_cli.h"
 #include "pika_port.h"
 #include "pstd/include/env.h"
 #include "pstd/include/rsync.h"
 #include "pstd/include/pstd_string.h"
+
+namespace {
+
+bool ShouldSendEvent(std::string_view key, std::string_view type, std::string_view action) {
+  const EventFilter* filter = g_conf.event_filter.get();
+  if (!filter) {
+    return true;
+  }
+  return filter->ShouldSend(key, type, action);
+}
+
+void AdvanceCheckpoint(CheckpointManager* checkpoint_manager, const Checkpoint& cp) {
+  if (!checkpoint_manager) {
+    return;
+  }
+  checkpoint_manager->OnAck(nullptr, cp);
+}
+
+}  // namespace
 
 PikaPort::PikaPort(std::string& master_ip, int master_port, std::string& passwd)
     : ping_thread_(nullptr),
@@ -321,10 +342,18 @@ int PikaPort::PublishSnapshotEvent(const net::RedisCmdArgsType& argv,
                                    const std::string& raw_resp,
                                    const std::string& data_type,
                                    const std::string& key) {
-  std::string resolved_key = key;
-  if (resolved_key.empty() && argv.size() > 1) {
-    resolved_key = argv[1];
+  std::string_view resolved_key_view = key;
+  if (resolved_key_view.empty() && argv.size() > 1) {
+    resolved_key_view = argv[1];
   }
+  std::string_view action_view;
+  if (!argv.empty()) {
+    action_view = argv[0];
+  }
+  if (!ShouldSendEvent(resolved_key_view, data_type, action_view)) {
+    return 0;
+  }
+  std::string resolved_key(resolved_key_view);
   std::string payload = BuildSnapshotEventJson(argv, g_conf.db_name, data_type, g_conf.source_id, raw_resp,
                                                resolved_key);
   KafkaRecord record;
@@ -348,11 +377,27 @@ int PikaPort::PublishBinlogEvent(const net::RedisCmdArgsType& argv,
                                  const PortBinlogItem& item,
                                  const std::string& raw_resp,
                                  const std::string& key) {
-  std::string resolved_key = key;
-  if (resolved_key.empty() && argv.size() > 1) {
-    resolved_key = argv[1];
+  std::string_view resolved_key_view = key;
+  if (resolved_key_view.empty() && argv.size() > 1) {
+    resolved_key_view = argv[1];
+  }
+  std::string_view action_view;
+  if (!argv.empty()) {
+    action_view = argv[0];
   }
   std::string data_type = CommandDataType(argv.empty() ? "" : argv[0]);
+  if (!ShouldSendEvent(resolved_key_view, data_type, action_view)) {
+    Checkpoint cp;
+    cp.filenum = item.filenum();
+    cp.offset = item.offset();
+    cp.logic_id = item.logic_id();
+    cp.server_id = item.server_id();
+    cp.term_id = 0;
+    cp.ts_ms = static_cast<uint64_t>(item.exec_time()) * 1000;
+    AdvanceCheckpoint(checkpoint_manager_, cp);
+    return 0;
+  }
+  std::string resolved_key(resolved_key_view);
   std::string payload = BuildBinlogEventJson(argv, item, g_conf.db_name, data_type, g_conf.source_id, raw_resp,
                                              resolved_key);
 
@@ -383,11 +428,27 @@ int PikaPort::PublishBinlogEvent(const net::RedisCmdArgsType& argv,
                                  const BinlogItem& item,
                                  const std::string& raw_resp,
                                  const std::string& key) {
-  std::string resolved_key = key;
-  if (resolved_key.empty() && argv.size() > 1) {
-    resolved_key = argv[1];
+  std::string_view resolved_key_view = key;
+  if (resolved_key_view.empty() && argv.size() > 1) {
+    resolved_key_view = argv[1];
+  }
+  std::string_view action_view;
+  if (!argv.empty()) {
+    action_view = argv[0];
   }
   std::string data_type = CommandDataType(argv.empty() ? "" : argv[0]);
+  if (!ShouldSendEvent(resolved_key_view, data_type, action_view)) {
+    Checkpoint cp;
+    cp.filenum = item.filenum();
+    cp.offset = item.offset();
+    cp.logic_id = item.logic_id();
+    cp.server_id = 0;
+    cp.term_id = item.term_id();
+    cp.ts_ms = static_cast<uint64_t>(item.exec_time()) * 1000;
+    AdvanceCheckpoint(checkpoint_manager_, cp);
+    return 0;
+  }
+  std::string resolved_key(resolved_key_view);
   std::string payload = BuildBinlogEventJson(argv, item, g_conf.db_name, data_type, g_conf.source_id, raw_resp,
                                              resolved_key);
 

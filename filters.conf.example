@@ -1,0 +1,11 @@
+# Event filter groups template for pika-port-kafka.
+# Usage: ./pika_port ... -F /path/to/filters.conf
+# One group per line. Empty lines and lines starting with # are ignored.
+# Syntax: key=PATTERN;type=TYPE1,TYPE2;action=CMD1,CMD2
+# Omit any field to match any value in that dimension.
+# key patterns:
+#   - prefix match if it ends with * and has no other regex meta (dev:topic:*)
+#   - regex match if it contains regex meta chars (.*[]()|^$+?\\)
+#   - exact match otherwise
+# Example group:
+# key=dev:topic:*;type=list;action=rpush

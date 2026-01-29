@@ -10,12 +10,16 @@
 #include <unistd.h>
 #include <cctype>
 #include <csignal>
+#include <fstream>
 #include <random>
+#include <string_view>
+#include <vector>
 
 #include <glog/logging.h>
 
 #include "checkpoint.h"
 #include "conf.h"
+#include "event_filter.h"
 #include "pika_port.h"
 
 Conf g_conf;
@@ -135,6 +139,8 @@ void Usage() {
   std::cout << "\t-J     -- kafka producer message.max.bytes (OPTIONAL default: 1000000)" << std::endl;
   std::cout << "\t-A     -- pb ack delay warn seconds (OPTIONAL default: 10, min: 1, 0 disables)" << std::endl;
   std::cout << "\t-I     -- pb idle reconnect seconds (OPTIONAL default: 30, min: 1, 0 disables)" << std::endl;
+  std::cout << "\t-F     -- event filter group or filter file (OPTIONAL, repeatable)" << std::endl;
+  std::cout << "\t-X     -- global exclude key filters, comma separated (OPTIONAL)" << std::endl;
   std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 "
                "-k 127.0.0.1:9092 -M dual -S pika.snapshot -B pika.binlog -O __pika_port_kafka_offsets "
                "-x 4 -R auto -l ./log -r ./rsync_dump -b 512 -E true"
@@ -180,6 +186,58 @@ static bool ParseKafkaStatsMode(const std::string& value, KafkaStatsMode* mode) 
   return false;
 }
 
+static std::string TrimString(std::string_view value) {
+  size_t start = 0;
+  while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+    ++start;
+  }
+  size_t end = value.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    --end;
+  }
+  return std::string(value.substr(start, end - start));
+}
+
+static void LoadFilterFile(const std::string& path,
+                           std::vector<std::string>* groups,
+                           std::vector<std::string>* warnings) {
+  if (!groups || !warnings) {
+    return;
+  }
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    warnings->push_back("filter file not found: " + path);
+    return;
+  }
+  std::string line;
+  while (std::getline(in, line)) {
+    std::string trimmed = TrimString(line);
+    if (trimmed.empty() || trimmed[0] == '#') {
+      continue;
+    }
+    groups->push_back(trimmed);
+  }
+}
+
+static void ExpandFilterGroupArgs(const std::vector<std::string>& args,
+                                  std::vector<std::string>* groups,
+                                  std::vector<std::string>* warnings) {
+  if (!groups || !warnings) {
+    return;
+  }
+  for (const auto& arg : args) {
+    std::string trimmed = TrimString(arg);
+    if (trimmed.empty()) {
+      continue;
+    }
+    if (trimmed.find('=') != std::string::npos) {
+      groups->push_back(trimmed);
+      continue;
+    }
+    LoadFilterFile(trimmed, groups, warnings);
+  }
+}
+
 void PrintInfo(const std::time_t& now) {
   std::cout << "================== Pika Port Kafka ==================" << std::endl;
   std::cout << "local_ip:" << g_conf.local_ip << std::endl;
@@ -211,6 +269,12 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Kafka_message_max_bytes:" << g_conf.kafka_message_max_bytes << std::endl;
   std::cout << "Pb_ack_delay_warn_ms:" << g_conf.pb_ack_delay_warn_ms << std::endl;
   std::cout << "Pb_idle_timeout_ms:" << g_conf.pb_idle_timeout_ms << std::endl;
+  if (g_conf.event_filter) {
+    g_conf.event_filter->Dump(std::cout);
+  } else {
+    std::cout << "Event_filter_groups:0" << std::endl;
+    std::cout << "Event_filter_exclude:none" << std::endl;
+  }
   std::cout << "Startup Time : " << asctime(localtime(&now));
   std::cout << "========================================================" << std::endl;
 }
@@ -227,7 +291,9 @@ int main(int argc, char* argv[]) {
   long num = 0;
   bool filenum_specified = false;
   bool offset_specified = false;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
+  std::vector<std::string> filter_group_args;
+  std::vector<std::string> filter_exclude_args;
+  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:F:X:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -387,6 +453,14 @@ int main(int argc, char* argv[]) {
           g_conf.pb_idle_timeout_ms = static_cast<int64_t>(num) * 1000;
         }
         break;
+      case 'F':
+        snprintf(buf, 1024, "%s", optarg);
+        filter_group_args.emplace_back(buf);
+        break;
+      case 'X':
+        snprintf(buf, 1024, "%s", optarg);
+        filter_exclude_args.emplace_back(buf);
+        break;
       case 'e':
         g_conf.exit_if_dbsync = true;
         break;
@@ -401,6 +475,10 @@ int main(int argc, char* argv[]) {
         return 0;
     }
   }
+
+  std::vector<std::string> filter_group_specs;
+  std::vector<std::string> filter_warnings;
+  ExpandFilterGroupArgs(filter_group_args, &filter_group_specs, &filter_warnings);
 
   const int64_t kMinHeartbeatIntervalMs = 1000;
   const int64_t kMinAckDelayWarnMs = 1000;
@@ -430,6 +508,10 @@ int main(int argc, char* argv[]) {
   }
   if (idle_timeout_clamped) {
     LOG(WARNING) << "PB idle reconnect interval too small, set to " << g_conf.pb_idle_timeout_ms << "ms";
+  }
+  g_conf.event_filter = EventFilter::Build(filter_group_specs, filter_exclude_args, &filter_warnings);
+  for (const auto& warning : filter_warnings) {
+    LOG(WARNING) << "Filter config: " << warning;
   }
   if (g_conf.source_id.empty()) {
     g_conf.source_id = g_conf.master_ip + ":" + std::to_string(g_conf.master_port);

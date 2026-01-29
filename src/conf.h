@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+class EventFilter;
+
 enum class KafkaStatsMode : uint8_t {
   kNone = 0,
   kAggregated = 1,
@@ -44,6 +46,7 @@ class Conf {
     kafka_stats_mode = KafkaStatsMode::kAggregated;
     pb_ack_delay_warn_ms = 10000;
     pb_idle_timeout_ms = 30000;
+    event_filter = nullptr;
   }
 
  public:
@@ -78,6 +81,7 @@ class Conf {
   KafkaStatsMode kafka_stats_mode;
   int64_t pb_ack_delay_warn_ms;
   int64_t pb_idle_timeout_ms;
+  std::shared_ptr<const EventFilter> event_filter;
 };
 
 extern Conf g_conf;
