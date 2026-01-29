@@ -226,6 +226,8 @@ void PikaPort::LogKafkaStats() {
                 << " outq=" << sender_current.outq
                 << " send_rate=" << send_rate
                 << " ack_rate=" << ack_rate
+                << " send_total=" << sender_current.send_total
+                << " ack_total=" << sender_current.ack_total
                 << " ack_err=" << ack_err_delta
                 << " produce_err=" << produce_err_delta;
     }
@@ -259,6 +261,8 @@ void PikaPort::LogKafkaStats() {
               << " outq=" << current.outq
               << " send_rate=" << send_rate
               << " ack_rate=" << ack_rate
+              << " send_total=" << current.send_total
+              << " ack_total=" << current.ack_total
               << " ack_err=" << ack_err_delta
               << " produce_err=" << produce_err_delta;
   }
