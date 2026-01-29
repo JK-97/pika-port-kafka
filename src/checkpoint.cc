@@ -2,10 +2,18 @@
 
 #include "pika_binlog.h"
 
+#include <chrono>
 #include <fstream>
 #include <sstream>
 
 #include <glog/logging.h>
+
+namespace {
+
+const uint64_t kFilteredCheckpointBatch = 256;
+const auto kFilteredCheckpointDelay = std::chrono::milliseconds(1000);
+
+}  // namespace
 
 CheckpointManager::CheckpointManager(std::string path,
                                      std::string source_id,
@@ -14,7 +22,9 @@ CheckpointManager::CheckpointManager(std::string path,
     : path_(std::move(path)),
       source_id_(std::move(source_id)),
       offsets_topic_(std::move(offsets_topic)),
-      brokers_(std::move(brokers)) {}
+      brokers_(std::move(brokers)) {
+  last_filtered_persist_ = std::chrono::steady_clock::now();
+}
 
 bool CheckpointManager::Load(Checkpoint* out) {
   if (LoadFromFile(out)) {
@@ -124,9 +134,42 @@ void CheckpointManager::OnAck(rd_kafka_t* producer, const Checkpoint& cp) {
   has_last_ = true;
   PersistLocal(cp);
   PersistKafka(producer, cp);
+  last_filtered_persist_ = std::chrono::steady_clock::now();
+  filtered_since_persist_ = 0;
   if (binlog_) {
     binlog_->SetProducerStatus(cp.filenum, cp.offset);
   }
+}
+
+void CheckpointManager::OnFiltered(const Checkpoint& cp) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!IsNewer(cp)) {
+    return;
+  }
+  last_ = cp;
+  has_last_ = true;
+  if (binlog_) {
+    binlog_->SetProducerStatus(cp.filenum, cp.offset);
+  }
+
+  filtered_since_persist_++;
+  auto now = std::chrono::steady_clock::now();
+  if (filtered_since_persist_ >= kFilteredCheckpointBatch ||
+      now - last_filtered_persist_ >= kFilteredCheckpointDelay) {
+    PersistLocal(cp);
+    last_filtered_persist_ = now;
+    filtered_since_persist_ = 0;
+  }
+}
+
+void CheckpointManager::FlushFiltered() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!has_last_ || filtered_since_persist_ == 0) {
+    return;
+  }
+  PersistLocal(last_);
+  last_filtered_persist_ = std::chrono::steady_clock::now();
+  filtered_since_persist_ = 0;
 }
 
 bool CheckpointManager::IsNewer(const Checkpoint& cp) const {

@@ -40,7 +40,7 @@ void AdvanceCheckpoint(CheckpointManager* checkpoint_manager, const Checkpoint& 
   if (!checkpoint_manager) {
     return;
   }
-  checkpoint_manager->OnAck(nullptr, cp);
+  checkpoint_manager->OnFiltered(cp);
 }
 
 }  // namespace
@@ -128,6 +128,9 @@ void PikaPort::Cleanup() {
   LOG(INFO) << "=============== Syncing =====================";
   LOG(INFO) << "Total events : " << replies << " delivered to kafka";
 
+  if (checkpoint_manager_) {
+    checkpoint_manager_->FlushFiltered();
+  }
   delete this;  // PikaPort is a global object
   // ::google::ShutdownGoogleLogging();
 }

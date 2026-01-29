@@ -1,6 +1,7 @@
 #ifndef CHECKPOINT_H_
 #define CHECKPOINT_H_
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -26,6 +27,8 @@ class CheckpointManager {
   bool GetLast(Checkpoint* out) const;
   void SetBinlog(Binlog* binlog);
   void OnAck(rd_kafka_t* producer, const Checkpoint& cp);
+  void OnFiltered(const Checkpoint& cp);
+  void FlushFiltered();
 
  private:
   bool LoadFromFile(Checkpoint* out);
@@ -46,6 +49,8 @@ class CheckpointManager {
   Checkpoint last_;
   bool has_last_{false};
   Binlog* binlog_{nullptr};
+  uint64_t filtered_since_persist_{0};
+  std::chrono::steady_clock::time_point last_filtered_persist_{};
 };
 
 #endif  // CHECKPOINT_H_
