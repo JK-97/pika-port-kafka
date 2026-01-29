@@ -36,10 +36,22 @@ KafkaSender::~KafkaSender() {
   LOG(INFO) << "KafkaSender thread " << id_ << " exit!!!";
 }
 
+KafkaSender::StatsSnapshot KafkaSender::GetStatsSnapshot() const {
+  StatsSnapshot snapshot;
+  snapshot.queue_size = queue_size_.load(std::memory_order_relaxed);
+  snapshot.outq_len = outq_len_.load(std::memory_order_relaxed);
+  snapshot.send_total = send_total_.load(std::memory_order_relaxed);
+  snapshot.ack_total = ack_total_.load(std::memory_order_relaxed);
+  snapshot.ack_err_total = ack_err_total_.load(std::memory_order_relaxed);
+  snapshot.produce_err_total = produce_err_total_.load(std::memory_order_relaxed);
+  return snapshot;
+}
+
 void KafkaSender::Enqueue(const KafkaRecord& record) {
   std::unique_lock lock(queue_mutex_);
   if (queue_.size() < 100000) {
     queue_.push(record);
+    queue_size_.fetch_add(1, std::memory_order_relaxed);
     queue_signal_.notify_one();
     return;
   }
@@ -52,6 +64,7 @@ void KafkaSender::Enqueue(const KafkaRecord& record) {
     return;
   }
   queue_.push(record);
+  queue_size_.fetch_add(1, std::memory_order_relaxed);
   queue_signal_.notify_one();
 }
 
@@ -94,6 +107,13 @@ void KafkaSender::CloseProducer() {
 
 void KafkaSender::DeliveryReportCallback(rd_kafka_t* rk, const rd_kafka_message_t* rkmessage, void* opaque) {
   auto* ctx = static_cast<DeliveryContext*>(rkmessage->_private);
+  if (ctx && ctx->sender) {
+    if (rkmessage->err) {
+      ctx->sender->ack_err_total_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      ctx->sender->ack_total_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   if (rkmessage->err) {
     if (ctx) {
       LOG(WARNING) << "Kafka delivery failed: " << rd_kafka_err2str(rkmessage->err)
@@ -115,28 +135,23 @@ void* KafkaSender::ThreadMain() {
     return nullptr;
   }
 
-  auto last_metrics = std::chrono::steady_clock::now();
-  const auto stats_interval = std::chrono::milliseconds(conf_.kafka_stats_interval_ms);
-  const size_t stats_backlog_threshold = conf_.kafka_stats_backlog_threshold;
-  auto maybe_log_stats = [&](size_t qsize) {
-    if (conf_.kafka_stats_interval_ms <= 0) {
+  const bool stats_enabled =
+      conf_.kafka_stats_mode != KafkaStatsMode::kNone && conf_.heartbeat_interval_ms > 0;
+  const auto stats_interval = std::chrono::milliseconds(conf_.heartbeat_interval_ms);
+  auto last_outq_sample = std::chrono::steady_clock::now() - stats_interval;
+  auto maybe_sample_outq = [&](const std::chrono::steady_clock::time_point& now) {
+    if (!stats_enabled) {
       return;
     }
-    auto now = std::chrono::steady_clock::now();
-    if (now - last_metrics < stats_interval) {
+    if (now - last_outq_sample < stats_interval) {
       return;
     }
-    int outq = producer_ ? rd_kafka_outq_len(producer_) : -1;
-    if (stats_backlog_threshold > 0) {
-      if (qsize < stats_backlog_threshold &&
-          (outq < 0 || outq < static_cast<int>(stats_backlog_threshold))) {
-        last_metrics = now;
-        return;
-      }
+    int outq = producer_ ? rd_kafka_outq_len(producer_) : 0;
+    if (outq < 0) {
+      outq = 0;
     }
-    LOG(INFO) << "KafkaSender " << id_ << " stats: queue=" << qsize
-              << " outq=" << outq << " elements=" << elements_;
-    last_metrics = now;
+    outq_len_.store(outq, std::memory_order_relaxed);
+    last_outq_sample = now;
   };
   while (!should_exit_) {
     KafkaRecord record;
@@ -146,19 +161,22 @@ void* KafkaSender::ThreadMain() {
                              [this]() { return should_exit_.load() || !queue_.empty(); });
       if (queue_.empty()) {
         rd_kafka_poll(producer_, 0);
-        maybe_log_stats(queue_.size());
+        maybe_sample_outq(std::chrono::steady_clock::now());
         continue;
       }
       record = queue_.front();
       queue_.pop();
+      queue_size_.fetch_sub(1, std::memory_order_relaxed);
     }
 
     elements_++;
+    send_total_.fetch_add(1, std::memory_order_relaxed);
     auto* ctx = new DeliveryContext{checkpoint_manager_,
                                     record.checkpoint,
                                     record.has_checkpoint,
                                     record.key,
-                                    record.payload.size()};
+                                    record.payload.size(),
+                                    this};
     rd_kafka_resp_err_t err = rd_kafka_producev(
         producer_,
         RD_KAFKA_V_TOPIC(record.topic.c_str()),
@@ -168,6 +186,7 @@ void* KafkaSender::ThreadMain() {
         RD_KAFKA_V_OPAQUE(ctx),
         RD_KAFKA_V_END);
     if (err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+      produce_err_total_.fetch_add(1, std::memory_order_relaxed);
       LOG(WARNING) << "Kafka produce failed: " << rd_kafka_err2str(err)
                    << " key=" << FormatKeyForLog(record.key)
                    << " payload_size=" << record.payload.size();
@@ -175,12 +194,7 @@ void* KafkaSender::ThreadMain() {
     }
 
     rd_kafka_poll(producer_, 0);
-    size_t qsize = 0;
-    {
-      std::lock_guard lock(queue_mutex_);
-      qsize = queue_.size();
-    }
-    maybe_log_stats(qsize);
+    maybe_sample_outq(std::chrono::steady_clock::now());
   }
 
   rd_kafka_poll(producer_, 0);

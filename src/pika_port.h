@@ -21,7 +21,9 @@
 #include "net/include/redis_cli.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -97,6 +99,7 @@ class PikaPort {
   void StopHeartbeat();
   void HeartbeatLoop();
   void LogHeartbeat();
+  void LogKafkaStats();
 
   std::string master_ip_;
   int master_port_;
@@ -131,6 +134,18 @@ class PikaPort {
   std::atomic<bool> heartbeat_stop_{false};
   std::mutex heartbeat_mutex_;
   std::condition_variable heartbeat_cv_;
+  struct KafkaStatsTotals {
+    int64_t queue{0};
+    int64_t outq{0};
+    uint64_t send_total{0};
+    uint64_t ack_total{0};
+    uint64_t ack_err_total{0};
+    uint64_t produce_err_total{0};
+  };
+  KafkaStatsTotals last_kafka_stats_;
+  std::vector<KafkaStatsTotals> last_sender_stats_;
+  std::chrono::steady_clock::time_point last_kafka_stats_time_;
+  bool has_kafka_stats_{false};
 
   PikaPort(PikaPort& bs);
   void operator=(const PikaPort& bs);

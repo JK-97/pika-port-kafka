@@ -60,8 +60,8 @@
 性能/运行：
 
 - `-x` Kafka 发送线程数（默认 `1`）
-- `-Q` Kafka sender 统计输出间隔秒数（默认 `5`，最小 `1`，`0` 关闭）
-- `-q` Kafka sender backlog 阈值（默认 `0`，`0` 表示始终输出；>0 时仅在 queue/outq >= 阈值时输出）
+- `-G` Heartbeat 中 Kafka sender 统计输出模式（`none|agg|detail|all`，默认 `agg`）
+  - `agg` 输出聚合视图，`detail` 输出每个 sender 明细，`all` 同时输出
 - `-b` snapshot 扫描批量（默认 `512`）
 - `-z` 等待 master bgsave 超时（默认 `1800` 秒）
 - `-E` enable idempotence（默认 `true`）

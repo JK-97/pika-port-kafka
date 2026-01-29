@@ -143,6 +143,106 @@ void PikaPort::LogHeartbeat() {
   }
 }
 
+void PikaPort::LogKafkaStats() {
+  if (senders_.empty()) {
+    return;
+  }
+  KafkaStatsMode mode = g_conf.kafka_stats_mode;
+  bool show_agg = mode == KafkaStatsMode::kAggregated || mode == KafkaStatsMode::kAll;
+  bool show_detail = mode == KafkaStatsMode::kPerSender || mode == KafkaStatsMode::kAll;
+  if (!show_agg && !show_detail) {
+    return;
+  }
+  if (last_sender_stats_.size() != senders_.size()) {
+    last_sender_stats_.assign(senders_.size(), KafkaStatsTotals{});
+    has_kafka_stats_ = false;
+  }
+
+  auto now = std::chrono::steady_clock::now();
+  KafkaStatsTotals current;
+  auto safe_delta = [](uint64_t current_value, uint64_t last_value) -> uint64_t {
+    return current_value >= last_value ? (current_value - last_value) : 0;
+  };
+  double elapsed_sec = 0.0;
+  if (has_kafka_stats_) {
+    elapsed_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_kafka_stats_time_).count();
+  }
+
+  for (size_t i = 0; i < senders_.size(); ++i) {
+    auto* sender = senders_[i];
+    if (!sender) {
+      continue;
+    }
+    auto snapshot = sender->GetStatsSnapshot();
+    KafkaStatsTotals sender_current;
+    sender_current.queue = snapshot.queue_size;
+    sender_current.outq = snapshot.outq_len;
+    sender_current.send_total = snapshot.send_total;
+    sender_current.ack_total = snapshot.ack_total;
+    sender_current.ack_err_total = snapshot.ack_err_total;
+    sender_current.produce_err_total = snapshot.produce_err_total;
+
+    current.queue += sender_current.queue;
+    current.outq += sender_current.outq;
+    current.send_total += sender_current.send_total;
+    current.ack_total += sender_current.ack_total;
+    current.ack_err_total += sender_current.ack_err_total;
+    current.produce_err_total += sender_current.produce_err_total;
+
+    if (show_detail && has_kafka_stats_ && elapsed_sec > 0 && i < last_sender_stats_.size()) {
+      const auto& last_sender = last_sender_stats_[i];
+      uint64_t send_delta = safe_delta(sender_current.send_total, last_sender.send_total);
+      uint64_t ack_delta = safe_delta(sender_current.ack_total, last_sender.ack_total);
+      uint64_t ack_err_delta = safe_delta(sender_current.ack_err_total, last_sender.ack_err_total);
+      uint64_t produce_err_delta = safe_delta(sender_current.produce_err_total, last_sender.produce_err_total);
+      double send_rate = static_cast<double>(send_delta) / elapsed_sec;
+      double ack_rate = static_cast<double>(ack_delta) / elapsed_sec;
+      LOG(INFO) << "KafkaSenderStats: id=" << i
+                << " queue=" << sender_current.queue
+                << " outq=" << sender_current.outq
+                << " send_rate=" << send_rate
+                << " ack_rate=" << ack_rate
+                << " ack_err=" << ack_err_delta
+                << " produce_err=" << produce_err_delta;
+    }
+
+    if (i < last_sender_stats_.size()) {
+      last_sender_stats_[i] = sender_current;
+    }
+  }
+
+  if (!has_kafka_stats_) {
+    last_kafka_stats_ = current;
+    last_kafka_stats_time_ = now;
+    has_kafka_stats_ = true;
+    return;
+  }
+
+  if (elapsed_sec <= 0) {
+    last_kafka_stats_ = current;
+    last_kafka_stats_time_ = now;
+    return;
+  }
+
+  if (show_agg) {
+    uint64_t send_delta = safe_delta(current.send_total, last_kafka_stats_.send_total);
+    uint64_t ack_delta = safe_delta(current.ack_total, last_kafka_stats_.ack_total);
+    uint64_t ack_err_delta = safe_delta(current.ack_err_total, last_kafka_stats_.ack_err_total);
+    uint64_t produce_err_delta = safe_delta(current.produce_err_total, last_kafka_stats_.produce_err_total);
+    double send_rate = static_cast<double>(send_delta) / elapsed_sec;
+    double ack_rate = static_cast<double>(ack_delta) / elapsed_sec;
+    LOG(INFO) << "KafkaStats: queue=" << current.queue
+              << " outq=" << current.outq
+              << " send_rate=" << send_rate
+              << " ack_rate=" << ack_rate
+              << " ack_err=" << ack_err_delta
+              << " produce_err=" << produce_err_delta;
+  }
+
+  last_kafka_stats_ = current;
+  last_kafka_stats_time_ = now;
+}
+
 void PikaPort::HeartbeatLoop() {
   const auto interval = std::chrono::milliseconds(g_conf.heartbeat_interval_ms);
   while (!heartbeat_stop_.load()) {
@@ -152,6 +252,7 @@ void PikaPort::HeartbeatLoop() {
       break;
     }
     LogHeartbeat();
+    LogKafkaStats();
   }
 }
 

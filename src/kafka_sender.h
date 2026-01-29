@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -24,12 +25,22 @@ struct KafkaRecord {
 
 class KafkaSender : public net::Thread {
  public:
+  struct StatsSnapshot {
+    int64_t queue_size{0};
+    int64_t outq_len{0};
+    uint64_t send_total{0};
+    uint64_t ack_total{0};
+    uint64_t ack_err_total{0};
+    uint64_t produce_err_total{0};
+  };
+
   KafkaSender(int id, const Conf& conf, CheckpointManager* checkpoint_manager);
   ~KafkaSender() override;
 
   void Enqueue(const KafkaRecord& record);
   void Stop();
   int64_t elements() const { return elements_; }
+  StatsSnapshot GetStatsSnapshot() const;
 
  private:
   void* ThreadMain() override;
@@ -45,6 +56,7 @@ class KafkaSender : public net::Thread {
     bool has_checkpoint;
     std::string key;
     size_t payload_size;
+    KafkaSender* sender;
   };
 
   int id_;
@@ -57,6 +69,12 @@ class KafkaSender : public net::Thread {
   pstd::Mutex queue_mutex_;
   pstd::CondVar queue_signal_;
   int64_t elements_;
+  std::atomic<int64_t> queue_size_{0};
+  std::atomic<int64_t> outq_len_{0};
+  std::atomic<uint64_t> send_total_{0};
+  std::atomic<uint64_t> ack_total_{0};
+  std::atomic<uint64_t> ack_err_total_{0};
+  std::atomic<uint64_t> produce_err_total_{0};
 };
 
 #endif  // KAFKA_SENDER_H_
