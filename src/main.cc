@@ -129,6 +129,7 @@ void Usage() {
   std::cout << "\t-B     -- kafka binlog topic (OPTIONAL)" << std::endl;
   std::cout << "\t-T     -- kafka single stream topic (OPTIONAL)" << std::endl;
   std::cout << "\t-O     -- kafka offsets topic (OPTIONAL)" << std::endl;
+  std::cout << "\t-Q     -- enable kafka offsets topic (true|false, OPTIONAL default: true)" << std::endl;
   std::cout << "\t-P     -- checkpoint file path (OPTIONAL)" << std::endl;
   std::cout << "\t-M     -- kafka stream mode (dual|single)" << std::endl;
   std::cout << "\t-U     -- source id (OPTIONAL host:port)" << std::endl;
@@ -260,6 +261,7 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Kafka_topic_binlog:" << g_conf.kafka_topic_binlog << std::endl;
   std::cout << "Kafka_topic_single:" << g_conf.kafka_topic_single << std::endl;
   std::cout << "Kafka_topic_offsets:" << g_conf.kafka_topic_offsets << std::endl;
+  std::cout << "Kafka_offsets_enabled:" << (g_conf.kafka_offsets_enabled ? "true" : "false") << std::endl;
   std::cout << "Checkpoint_path:" << g_conf.checkpoint_path << std::endl;
   std::cout << "Source_id:" << g_conf.source_id << std::endl;
   std::cout << "Db_name:" << g_conf.db_name << std::endl;
@@ -293,7 +295,7 @@ int main(int argc, char* argv[]) {
   bool offset_specified = false;
   std::vector<std::string> filter_group_args;
   std::vector<std::string> filter_exclude_args;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:F:X:edhk:c:S:B:T:O:P:M:U:D:E:R:"))) {
+  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:F:X:edhk:c:S:B:T:O:P:M:U:D:E:R:Q:"))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -394,6 +396,10 @@ int main(int argc, char* argv[]) {
       case 'O':
         snprintf(buf, 1024, "%s", optarg);
         g_conf.kafka_topic_offsets = std::string(buf);
+        break;
+      case 'Q':
+        snprintf(buf, 1024, "%s", optarg);
+        g_conf.kafka_offsets_enabled = (std::string(buf) != "false");
         break;
       case 'P':
         snprintf(buf, 1024, "%s", optarg);
@@ -525,7 +531,8 @@ int main(int argc, char* argv[]) {
 
   if (g_conf.filenum == UINT32_MAX) {
     CheckpointManager checkpoint_manager(g_conf.checkpoint_path, g_conf.source_id,
-                                         g_conf.kafka_topic_offsets, g_conf.kafka_brokers);
+                                         g_conf.kafka_topic_offsets, g_conf.kafka_brokers,
+                                         g_conf.kafka_offsets_enabled);
     Checkpoint cp;
     if (checkpoint_manager.Load(&cp)) {
       g_conf.filenum = cp.filenum;

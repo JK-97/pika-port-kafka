@@ -41,6 +41,7 @@
 
 - `-P` checkpoint 文件路径（默认 `./checkpoint.json`）
 - `-O` offsets topic（默认 `__pika_port_kafka_offsets`）
+- `-Q` 是否写 offsets topic（`true|false`，默认 `true`）
 - `-U` source_id（默认 `master_ip:master_port`）
 - `-f/-s` 手动指定 binlog filenum/offset（设置后不会加载 checkpoint）
 

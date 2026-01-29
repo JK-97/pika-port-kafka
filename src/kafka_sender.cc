@@ -93,12 +93,18 @@ bool KafkaSender::InitProducer() {
     LOG(ERROR) << "Failed to create Kafka producer: " << errstr;
     return false;
   }
+  if (checkpoint_manager_) {
+    checkpoint_manager_->SetProducer(producer_);
+  }
   return true;
 }
 
 void KafkaSender::CloseProducer() {
   if (!producer_) {
     return;
+  }
+  if (checkpoint_manager_) {
+    checkpoint_manager_->UnsetProducer(producer_);
   }
   rd_kafka_flush(producer_, 10000);
   rd_kafka_destroy(producer_);

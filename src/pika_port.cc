@@ -65,7 +65,8 @@ PikaPort::PikaPort(std::string& master_ip, int master_port, std::string& passwd)
   }
 
   checkpoint_manager_ = new CheckpointManager(g_conf.checkpoint_path, g_conf.source_id,
-                                              g_conf.kafka_topic_offsets, g_conf.kafka_brokers);
+                                              g_conf.kafka_topic_offsets, g_conf.kafka_brokers,
+                                              g_conf.kafka_offsets_enabled);
 
   size_t thread_num = g_conf.kafka_sender_threads;
   for (size_t i = 0; i < thread_num; i++) {

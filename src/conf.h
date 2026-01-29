@@ -34,6 +34,7 @@ class Conf {
     kafka_topic_binlog = "pika.binlog";
     kafka_topic_single = "pika.stream";
     kafka_topic_offsets = "__pika_port_kafka_offsets";
+    kafka_offsets_enabled = true;
     checkpoint_path = "./checkpoint.json";
     source_id = "";
     db_name = "db0";
@@ -69,6 +70,7 @@ class Conf {
   std::string kafka_topic_binlog;
   std::string kafka_topic_single;
   std::string kafka_topic_offsets;
+  bool kafka_offsets_enabled;
   std::string checkpoint_path;
   std::string source_id;
   std::string db_name;

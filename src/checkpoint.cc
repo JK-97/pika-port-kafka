@@ -18,11 +18,13 @@ const auto kFilteredCheckpointDelay = std::chrono::milliseconds(1000);
 CheckpointManager::CheckpointManager(std::string path,
                                      std::string source_id,
                                      std::string offsets_topic,
-                                     std::string brokers)
+                                     std::string brokers,
+                                     bool enable_kafka_offsets)
     : path_(std::move(path)),
       source_id_(std::move(source_id)),
       offsets_topic_(std::move(offsets_topic)),
-      brokers_(std::move(brokers)) {
+      brokers_(std::move(brokers)),
+      enable_kafka_offsets_(enable_kafka_offsets) {
   last_filtered_persist_ = std::chrono::steady_clock::now();
 }
 
@@ -48,6 +50,32 @@ bool CheckpointManager::GetLast(Checkpoint* out) const {
 void CheckpointManager::SetBinlog(Binlog* binlog) {
   std::lock_guard<std::mutex> lock(mutex_);
   binlog_ = binlog;
+}
+
+void CheckpointManager::SetProducer(rd_kafka_t* producer) {
+  if (!producer) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  producer_refs_++;
+  if (!producer_) {
+    producer_ = producer;
+  }
+}
+
+void CheckpointManager::UnsetProducer(rd_kafka_t* producer) {
+  if (!producer) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (producer_refs_ > 0) {
+    producer_refs_--;
+  }
+  if (producer_refs_ == 0) {
+    producer_ = nullptr;
+  } else if (producer_ == producer) {
+    // keep current producer if others exist
+  }
 }
 
 bool CheckpointManager::LoadFromFile(Checkpoint* out) {
@@ -157,6 +185,9 @@ void CheckpointManager::OnFiltered(const Checkpoint& cp) {
   if (filtered_since_persist_ >= kFilteredCheckpointBatch ||
       now - last_filtered_persist_ >= kFilteredCheckpointDelay) {
     PersistLocal(cp);
+    if (enable_kafka_offsets_ && producer_) {
+      PersistKafka(producer_, cp);
+    }
     last_filtered_persist_ = now;
     filtered_since_persist_ = 0;
   }
@@ -168,6 +199,9 @@ void CheckpointManager::FlushFiltered() {
     return;
   }
   PersistLocal(last_);
+  if (enable_kafka_offsets_ && producer_) {
+    PersistKafka(producer_, last_);
+  }
   last_filtered_persist_ = std::chrono::steady_clock::now();
   filtered_since_persist_ = 0;
 }
@@ -196,7 +230,7 @@ void CheckpointManager::PersistLocal(const Checkpoint& cp) {
 }
 
 void CheckpointManager::PersistKafka(rd_kafka_t* producer, const Checkpoint& cp) {
-  if (!producer || offsets_topic_.empty()) {
+  if (!producer || offsets_topic_.empty() || !enable_kafka_offsets_) {
     return;
   }
   std::string payload = CheckpointToJson(cp);
