@@ -339,7 +339,7 @@ int main(int argc, char* argv[]) {
     exit(-1);
   }
 
-  char c;
+  int c;
   char buf[1024];
   bool is_daemon = false;
   long num = 0;
