@@ -366,6 +366,12 @@ bool PbReplClient::PerformFullSync(Offset* new_offset) {
   int sender_ret = sender.Run();
   if (sender_ret != 0) {
     LOG(WARNING) << "pb repl: snapshot sender failed";
+  } else if (auto* checkpoint_manager = pika_port_->checkpoint_manager(); checkpoint_manager) {
+    Checkpoint cp;
+    cp.filenum = new_offset->filenum;
+    cp.offset = new_offset->offset;
+    checkpoint_manager->OnFiltered(cp);
+    checkpoint_manager->FlushFiltered();
   }
   return true;
 }
@@ -577,6 +583,17 @@ void PbReplClient::ThreadMain() {
         continue;
       }
       UpdateLoggerOffset(new_offset);
+
+      repl_cli_->Close();
+      if (!ConnectRepl()) {
+        sleep(1);
+        continue;
+      }
+      if (!SendMetaSync()) {
+        repl_cli_->Close();
+        sleep(1);
+        continue;
+      }
 
       if (!SendTrySync(new_offset, &session_id, &reply_code)) {
         repl_cli_->Close();
