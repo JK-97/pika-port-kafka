@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  pika-port:
+    build: .
+    container_name: pika-port
+    network_mode: "host"
+    restart: unless-stopped
+    working_dir: /data/devops/pika_ops
+    volumes:
+      - ./checkpoint.json:/data/devops/pika_ops/checkpoint.json
+      - ./filter.conf:/data/devops/pika_ops/filter.conf:ro
+      - ./log:/data/devops/pika_ops/log
+      - ./rsync_dump:/data/devops/pika_ops/rsync_dump
+    command:
+      - "-t"
+      - "${PIKA_LOCAL_IP}"
+      - "-p"
+      - "${PIKA_LOCAL_PORT}"
+      - "-i"
+      - "${PIKA_MASTER_IP}"
+      - "-o"
+      - "${PIKA_MASTER_PORT}"
+      - "-k"
+      - "${KAFKA_BROKERS}"
+      - "-M"
+      - "${KAFKA_STREAM_MODE}"
+      - "-T"
+      - "${KAFKA_TOPIC_SINGLE}"
+      - "-S"
+      - "${KAFKA_TOPIC_SNAPSHOT}"
+      - "-B"
+      - "${KAFKA_TOPIC_BINLOG}"
+      - "-O"
+      - "${KAFKA_TOPIC_OFFSETS}"
+      - "-Q"
+      - "${KAFKA_OFFSETS_ENABLED}"
+      - "-P"
+      - "/data/devops/pika_ops/checkpoint.json"
+      - "-U"
+      - "${SOURCE_ID}"
+      - "-D"
+      - "${DB_NAME}"
+      - "-l"
+      - "/data/devops/pika_ops/log"
+      - "-r"
+      - "/data/devops/pika_ops/rsync_dump"
+      - "-R"
+      - "${SYNC_PROTOCOL}"
+      - "-J"
+      - "${KAFKA_MESSAGE_MAX_BYTES}"
+      - "-A"
+      - "${PB_ACK_DELAY_WARN_S}"
+      - "-H"
+      - "${HEARTBEAT_INTERVAL_S}"
+      - "-I"
+      - "${PB_IDLE_TIMEOUT_S}"
+      - "-G"
+      - "${KAFKA_STATS_MODE}"
+      - "-F"
+      - "/data/devops/pika_ops/filter.conf"
