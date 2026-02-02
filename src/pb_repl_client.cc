@@ -339,6 +339,20 @@ bool PbReplClient::LoadBgsaveInfo(Offset* offset) {
 }
 
 bool PbReplClient::PerformFullSync(Offset* new_offset) {
+  struct FullSyncGuard {
+    explicit FullSyncGuard(PikaPort* port_in) : port(port_in) {
+      if (port) {
+        port->SetFullSyncing(true);
+      }
+    }
+    ~FullSyncGuard() {
+      if (port) {
+        port->SetFullSyncing(false);
+      }
+    }
+    PikaPort* port;
+  };
+  FullSyncGuard guard(pika_port_);
   std::string dump_path = BuildDumpPath(g_conf.dump_path, g_conf.db_name);
   RsyncClientSimple rsync(g_conf.master_ip, g_conf.master_port, g_conf.db_name, dump_path,
                           kRsyncChunkBytes, kRsyncTimeoutMs);
@@ -349,9 +363,7 @@ bool PbReplClient::PerformFullSync(Offset* new_offset) {
     return false;
   }
   SnapshotSender sender(g_conf, pika_port_->checkpoint_manager());
-  pika_port_->SetFullSyncing(true);
   int sender_ret = sender.Run();
-  pika_port_->SetFullSyncing(false);
   if (sender_ret != 0) {
     LOG(WARNING) << "pb repl: snapshot sender failed";
   }

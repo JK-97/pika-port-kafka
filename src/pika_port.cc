@@ -586,11 +586,13 @@ bool PikaPort::IsWaitingDBSync() {
 void PikaPort::NeedWaitDBSync() {
   std::lock_guard l(state_protector_);
   repl_state_ = PIKA_REPL_WAIT_DBSYNC;
+  SetFullSyncing(true);
 }
 
 void PikaPort::WaitDBSyncFinish() {
   std::lock_guard l(state_protector_);
   if (repl_state_ == PIKA_REPL_WAIT_DBSYNC) {
     repl_state_ = PIKA_REPL_CONNECT;
+    SetFullSyncing(false);
   }
 }
