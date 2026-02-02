@@ -102,6 +102,16 @@ bool ShouldSendSnapshotEvent(const net::RedisCmdArgsType& argv,
   return filter->ShouldSend(key, data_type, action);
 }
 
+bool ShouldSendSnapshotKeyAction(const std::string& data_type,
+                                 const std::string& key,
+                                 std::string_view action) {
+  const EventFilter* filter = g_conf.event_filter.get();
+  if (!filter) {
+    return true;
+  }
+  return filter->ShouldSend(key, data_type, action);
+}
+
 KafkaRecord MakeSnapshotRecord(const net::RedisCmdArgsType& argv,
                                const std::string& data_type,
                                const std::string& key,
@@ -138,6 +148,10 @@ void MigratorThread::MigrateStringsDB() {
         break;
       }
       if (ShouldSkipKey(k)) {
+        continue;
+      }
+      PlusKeysScanned();
+      if (!ShouldSendSnapshotKeyAction(data_type, k, "set")) {
         continue;
       }
 
@@ -189,58 +203,68 @@ void MigratorThread::MigrateListsDB() {
       if (ShouldSkipKey(k)) {
         continue;
       }
-
-      int64_t pos = 0;
-      std::vector<std::string> list;
-      storage::Status s = db->LRange(k, pos, pos + g_conf.sync_batch_num - 1, &list);
-      if (!s.ok()) {
-        LOG(WARNING) << "db->LRange(key:" << k << ", pos:" << pos << ", batch size:" << g_conf.sync_batch_num
-                     << ") = " << s.ToString();
+      PlusKeysScanned();
+      const bool allow_rpush = ShouldSendSnapshotKeyAction(data_type, k, "rpush");
+      const bool allow_expire = ShouldSendSnapshotKeyAction(data_type, k, "expire");
+      if (!allow_rpush && !allow_expire) {
         continue;
       }
 
-      while (s.ok() && !should_exit_ && !list.empty()) {
-        net::RedisCmdArgsType argv;
-        std::string cmd;
-
-        argv.push_back("RPUSH");
-        argv.push_back(k);
-        for (const auto& e : list) {
-          argv.push_back(e);
-        }
-
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
-          break;
-        }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
-
-        pos += g_conf.sync_batch_num;
-        list.clear();
-        s = db->LRange(k, pos, pos + g_conf.sync_batch_num - 1, &list);
+      int64_t pos = 0;
+      std::vector<std::string> list;
+      if (allow_rpush) {
+        storage::Status s = db->LRange(k, pos, pos + g_conf.sync_batch_num - 1, &list);
         if (!s.ok()) {
           LOG(WARNING) << "db->LRange(key:" << k << ", pos:" << pos << ", batch size:" << g_conf.sync_batch_num
                        << ") = " << s.ToString();
+          continue;
+        }
+
+        while (s.ok() && !should_exit_ && !list.empty()) {
+          net::RedisCmdArgsType argv;
+          std::string cmd;
+
+          argv.push_back("RPUSH");
+          argv.push_back(k);
+          for (const auto& e : list) {
+            argv.push_back(e);
+          }
+
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            break;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
+
+          pos += g_conf.sync_batch_num;
+          list.clear();
+          s = db->LRange(k, pos, pos + g_conf.sync_batch_num - 1, &list);
+          if (!s.ok()) {
+            LOG(WARNING) << "db->LRange(key:" << k << ", pos:" << pos << ", batch size:" << g_conf.sync_batch_num
+                         << ") = " << s.ToString();
+          }
         }
       }
 
-      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kLists);
-      if (ttl > 0) {
-        net::RedisCmdArgsType argv;
-        std::string cmd;
+      if (allow_expire) {
+        int64_t ttl = GetTTLCompat(db, k, storage::DataType::kLists);
+        if (ttl > 0) {
+          net::RedisCmdArgsType argv;
+          std::string cmd;
 
-        argv.push_back("EXPIRE");
-        argv.push_back(k);
-        argv.push_back(std::to_string(ttl));
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
-          continue;
+          argv.push_back("EXPIRE");
+          argv.push_back(k);
+          argv.push_back(std::to_string(ttl));
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            continue;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
         }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
       }
     }
   } while (cursor != 0 && !should_exit_);
@@ -264,50 +288,60 @@ void MigratorThread::MigrateHashesDB() {
       if (ShouldSkipKey(k)) {
         continue;
       }
-
-      std::vector<storage::FieldValue> fvs;
-      storage::Status s = db->HGetall(k, &fvs);
-      if (!s.ok()) {
-        LOG(WARNING) << "db->HGetall(key:" << k << ") = " << s.ToString();
+      PlusKeysScanned();
+      const bool allow_hmset = ShouldSendSnapshotKeyAction(data_type, k, "hmset");
+      const bool allow_expire = ShouldSendSnapshotKeyAction(data_type, k, "expire");
+      if (!allow_hmset && !allow_expire) {
         continue;
       }
 
-      auto it = fvs.begin();
-      while (!should_exit_ && it != fvs.end()) {
-        net::RedisCmdArgsType argv;
-        std::string cmd;
-
-        argv.push_back("HMSET");
-        argv.push_back(k);
-        for (size_t idx = 0; idx < g_conf.sync_batch_num && !should_exit_ && it != fvs.end(); idx++, it++) {
-          argv.push_back(it->field);
-          argv.push_back(it->value);
-        }
-
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
-          break;
-        }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
-      }
-
-      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kHashes);
-      if (ttl > 0) {
-        net::RedisCmdArgsType argv;
-        std::string cmd;
-
-        argv.push_back("EXPIRE");
-        argv.push_back(k);
-        argv.push_back(std::to_string(ttl));
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+      if (allow_hmset) {
+        std::vector<storage::FieldValue> fvs;
+        storage::Status s = db->HGetall(k, &fvs);
+        if (!s.ok()) {
+          LOG(WARNING) << "db->HGetall(key:" << k << ") = " << s.ToString();
           continue;
         }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
+
+        auto it = fvs.begin();
+        while (!should_exit_ && it != fvs.end()) {
+          net::RedisCmdArgsType argv;
+          std::string cmd;
+
+          argv.push_back("HMSET");
+          argv.push_back(k);
+          for (size_t idx = 0; idx < g_conf.sync_batch_num && !should_exit_ && it != fvs.end(); idx++, it++) {
+            argv.push_back(it->field);
+            argv.push_back(it->value);
+          }
+
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            break;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
+        }
+      }
+
+      if (allow_expire) {
+        int64_t ttl = GetTTLCompat(db, k, storage::DataType::kHashes);
+        if (ttl > 0) {
+          net::RedisCmdArgsType argv;
+          std::string cmd;
+
+          argv.push_back("EXPIRE");
+          argv.push_back(k);
+          argv.push_back(std::to_string(ttl));
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            continue;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
+        }
       }
     }
   } while (cursor != 0 && !should_exit_);
@@ -331,48 +365,58 @@ void MigratorThread::MigrateSetsDB() {
       if (ShouldSkipKey(k)) {
         continue;
       }
-
-      std::vector<std::string> members;
-      storage::Status s = db->SMembers(k, &members);
-      if (!s.ok()) {
-        LOG(WARNING) << "db->SMembers(key:" << k << ") = " << s.ToString();
+      PlusKeysScanned();
+      const bool allow_sadd = ShouldSendSnapshotKeyAction(data_type, k, "sadd");
+      const bool allow_expire = ShouldSendSnapshotKeyAction(data_type, k, "expire");
+      if (!allow_sadd && !allow_expire) {
         continue;
       }
-      auto it = members.begin();
-      while (!should_exit_ && it != members.end()) {
-        std::string cmd;
-        net::RedisCmdArgsType argv;
 
-        argv.push_back("SADD");
-        argv.push_back(k);
-        for (size_t idx = 0; idx < g_conf.sync_batch_num && !should_exit_ && it != members.end(); idx++, it++) {
-          argv.push_back(*it);
-        }
-
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
-          break;
-        }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
-      }
-
-      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kSets);
-      if (ttl > 0) {
-        net::RedisCmdArgsType argv;
-        std::string cmd;
-
-        argv.push_back("EXPIRE");
-        argv.push_back(k);
-        argv.push_back(std::to_string(ttl));
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+      if (allow_sadd) {
+        std::vector<std::string> members;
+        storage::Status s = db->SMembers(k, &members);
+        if (!s.ok()) {
+          LOG(WARNING) << "db->SMembers(key:" << k << ") = " << s.ToString();
           continue;
         }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
+        auto it = members.begin();
+        while (!should_exit_ && it != members.end()) {
+          std::string cmd;
+          net::RedisCmdArgsType argv;
+
+          argv.push_back("SADD");
+          argv.push_back(k);
+          for (size_t idx = 0; idx < g_conf.sync_batch_num && !should_exit_ && it != members.end(); idx++, it++) {
+            argv.push_back(*it);
+          }
+
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            break;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
+        }
+      }
+
+      if (allow_expire) {
+        int64_t ttl = GetTTLCompat(db, k, storage::DataType::kSets);
+        if (ttl > 0) {
+          net::RedisCmdArgsType argv;
+          std::string cmd;
+
+          argv.push_back("EXPIRE");
+          argv.push_back(k);
+          argv.push_back(std::to_string(ttl));
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            continue;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
+        }
       }
     }
   } while (cursor != 0 && !should_exit_);
@@ -396,62 +440,72 @@ void MigratorThread::MigrateZsetsDB() {
       if (ShouldSkipKey(k)) {
         continue;
       }
-
-      int64_t pos = 0;
-      std::vector<storage::ScoreMember> score_members;
-      storage::Status s = db->ZRange(k, static_cast<int32_t>(pos),
-                                     static_cast<int32_t>(pos + g_conf.sync_batch_num - 1), &score_members);
-      if (!s.ok()) {
-        LOG(WARNING) << "db->ZRange(key:" << k << ", pos:" << pos << ", batch size:" << g_conf.sync_batch_num
-                     << ") = " << s.ToString();
+      PlusKeysScanned();
+      const bool allow_zadd = ShouldSendSnapshotKeyAction(data_type, k, "zadd");
+      const bool allow_expire = ShouldSendSnapshotKeyAction(data_type, k, "expire");
+      if (!allow_zadd && !allow_expire) {
         continue;
       }
 
-      while (s.ok() && !should_exit_ && !score_members.empty()) {
-        net::RedisCmdArgsType argv;
-        std::string cmd;
-
-        argv.push_back("ZADD");
-        argv.push_back(k);
-
-        for (const auto& sm : score_members) {
-          argv.push_back(std::to_string(sm.score));
-          argv.push_back(sm.member);
-        }
-
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
-          break;
-        }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
-
-        pos += g_conf.sync_batch_num;
-        score_members.clear();
-        s = db->ZRange(k, static_cast<int32_t>(pos),
-                       static_cast<int32_t>(pos + g_conf.sync_batch_num - 1), &score_members);
+      int64_t pos = 0;
+      std::vector<storage::ScoreMember> score_members;
+      if (allow_zadd) {
+        storage::Status s = db->ZRange(k, static_cast<int32_t>(pos),
+                                       static_cast<int32_t>(pos + g_conf.sync_batch_num - 1), &score_members);
         if (!s.ok()) {
           LOG(WARNING) << "db->ZRange(key:" << k << ", pos:" << pos << ", batch size:" << g_conf.sync_batch_num
                        << ") = " << s.ToString();
+          continue;
+        }
+
+        while (s.ok() && !should_exit_ && !score_members.empty()) {
+          net::RedisCmdArgsType argv;
+          std::string cmd;
+
+          argv.push_back("ZADD");
+          argv.push_back(k);
+
+          for (const auto& sm : score_members) {
+            argv.push_back(std::to_string(sm.score));
+            argv.push_back(sm.member);
+          }
+
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            break;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
+
+          pos += g_conf.sync_batch_num;
+          score_members.clear();
+          s = db->ZRange(k, static_cast<int32_t>(pos),
+                         static_cast<int32_t>(pos + g_conf.sync_batch_num - 1), &score_members);
+          if (!s.ok()) {
+            LOG(WARNING) << "db->ZRange(key:" << k << ", pos:" << pos << ", batch size:" << g_conf.sync_batch_num
+                         << ") = " << s.ToString();
+          }
         }
       }
 
-      int64_t ttl = GetTTLCompat(db, k, storage::DataType::kZSets);
-      if (ttl > 0) {
-        net::RedisCmdArgsType argv;
-        std::string cmd;
+      if (allow_expire) {
+        int64_t ttl = GetTTLCompat(db, k, storage::DataType::kZSets);
+        if (ttl > 0) {
+          net::RedisCmdArgsType argv;
+          std::string cmd;
 
-        argv.push_back("EXPIRE");
-        argv.push_back(k);
-        argv.push_back(std::to_string(ttl));
-        if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
-          continue;
+          argv.push_back("EXPIRE");
+          argv.push_back(k);
+          argv.push_back(std::to_string(ttl));
+          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            continue;
+          }
+          net::SerializeRedisCommand(argv, &cmd);
+          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          PlusNum();
+          DispatchRecord(record);
         }
-        net::SerializeRedisCommand(argv, &cmd);
-        KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-        PlusNum();
-        DispatchRecord(record);
       }
     }
   } while (cursor != 0 && !should_exit_);

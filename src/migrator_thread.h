@@ -28,12 +28,23 @@ class MigratorThread : public net::Thread {
     return num_;
   }
 
+  int64_t keys_scanned() {
+    std::lock_guard l(num_mutex_);
+    return keys_scanned_;
+  }
+
   void Stop() { should_exit_ = true; }
+  int type() const { return type_; }
 
  private:
   void PlusNum() {
     std::lock_guard l(num_mutex_);
     ++num_;
+  }
+
+  void PlusKeysScanned() {
+    std::lock_guard l(num_mutex_);
+    ++keys_scanned_;
   }
 
   void DispatchRecord(const KafkaRecord& record);
@@ -57,6 +68,7 @@ class MigratorThread : public net::Thread {
  int thread_index_;
 
  int64_t num_;
+ int64_t keys_scanned_{0};
  pstd::Mutex num_mutex_;
 };
 

@@ -349,7 +349,10 @@ bool PbReplClient::PerformFullSync(Offset* new_offset) {
     return false;
   }
   SnapshotSender sender(g_conf, pika_port_->checkpoint_manager());
-  if (sender.Run() != 0) {
+  pika_port_->SetFullSyncing(true);
+  int sender_ret = sender.Run();
+  pika_port_->SetFullSyncing(false);
+  if (sender_ret != 0) {
     LOG(WARNING) << "pb repl: snapshot sender failed";
   }
   return true;

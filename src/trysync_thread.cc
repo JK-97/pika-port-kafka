@@ -248,6 +248,7 @@ bool TrysyncThread::TryUpdateMasterOffset() {
 
 int TrysyncThread::Retransmit() {
   SnapshotSender sender(g_conf, g_pika_port->checkpoint_manager());
+  g_pika_port->SetFullSyncing(true);
   retransmit_mutex_.lock();
   retransmit_flag_ = true;
   retransmit_mutex_.unlock();
@@ -255,6 +256,7 @@ int TrysyncThread::Retransmit() {
   retransmit_mutex_.lock();
   retransmit_flag_ = false;
   retransmit_mutex_.unlock();
+  g_pika_port->SetFullSyncing(false);
   return ret;
 }
 

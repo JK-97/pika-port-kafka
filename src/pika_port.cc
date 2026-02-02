@@ -280,6 +280,10 @@ void PikaPort::HeartbeatLoop() {
     if (heartbeat_stop_.load()) {
       break;
     }
+    if (IsFullSyncing()) {
+      has_kafka_stats_ = false;
+      continue;
+    }
     LogHeartbeat();
     LogKafkaStats();
   }

@@ -86,6 +86,8 @@ class PikaPort {
   bool IsWaitingDBSync();
   void NeedWaitDBSync();
   void WaitDBSyncFinish();
+  void SetFullSyncing(bool syncing) { full_syncing_.store(syncing, std::memory_order_relaxed); }
+  bool IsFullSyncing() const { return full_syncing_.load(std::memory_order_relaxed); }
 
   void Start();
  void Stop();
@@ -146,6 +148,7 @@ class PikaPort {
   std::vector<KafkaStatsTotals> last_sender_stats_;
   std::chrono::steady_clock::time_point last_kafka_stats_time_;
   bool has_kafka_stats_{false};
+  std::atomic<bool> full_syncing_{false};
 
   PikaPort(PikaPort& bs);
   void operator=(const PikaPort& bs);
