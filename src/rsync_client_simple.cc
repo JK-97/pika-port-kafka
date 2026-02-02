@@ -1,5 +1,6 @@
 #include "rsync_client_simple.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <thread>
@@ -13,8 +14,11 @@
 
 namespace {
 
-const int kRsyncMetaRetryMax = 60;
+const auto kRsyncMetaRetryMaxElapsed = std::chrono::minutes(30);
+const int kRsyncMetaRetryLogEvery = 5;
 const int kRsyncMetaRetrySleepMs = 1000;
+const int kRsyncMetaBackoffInitialMs = 1000;
+const int kRsyncMetaBackoffMaxMs = 15000;
 
 std::string JoinPath(const std::string& base, const std::string& path) {
   if (base.empty()) {
@@ -75,7 +79,18 @@ bool RsyncClientSimple::Fetch() {
 }
 
 bool RsyncClientSimple::FetchMeta(std::vector<std::string>* files) {
-  for (int attempt = 1; attempt <= kRsyncMetaRetryMax; ++attempt) {
+  const auto start_time = std::chrono::steady_clock::now();
+  int attempt = 0;
+  int meta_error_count = 0;
+  int backoff_ms = kRsyncMetaBackoffInitialMs;
+  while (true) {
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    if (elapsed >= kRsyncMetaRetryMaxElapsed) {
+      auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+      LOG(WARNING) << "rsync2: meta request timeout after " << elapsed_sec << "s, attempts=" << attempt;
+      return false;
+    }
+    ++attempt;
     std::unique_ptr<net::NetCli> cli(net::NewPbCli());
     cli->set_connect_timeout(timeout_ms_);
     cli->set_send_timeout(timeout_ms_);
@@ -110,8 +125,17 @@ bool RsyncClientSimple::FetchMeta(std::vector<std::string>* files) {
       continue;
     }
     if (response.code() != RsyncService::kOk || !response.has_meta_resp()) {
-      LOG(WARNING) << "rsync2: meta response error (attempt " << attempt << "/" << kRsyncMetaRetryMax << ")";
-      std::this_thread::sleep_for(std::chrono::milliseconds(kRsyncMetaRetrySleepMs));
+      ++meta_error_count;
+      elapsed = std::chrono::steady_clock::now() - start_time;
+      auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+      if (meta_error_count == 1 || meta_error_count % kRsyncMetaRetryLogEvery == 0) {
+        LOG(INFO) << "rsync2: meta not ready, waiting bgsave"
+                  << " attempt=" << meta_error_count
+                  << " elapsed=" << elapsed_sec << "s"
+                  << " next_sleep=" << backoff_ms << "ms";
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+      backoff_ms = std::min(backoff_ms * 2, kRsyncMetaBackoffMaxMs);
       continue;
     }
     snapshot_uuid_ = response.snapshot_uuid();
