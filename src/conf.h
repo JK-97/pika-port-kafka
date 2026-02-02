@@ -14,6 +14,11 @@ enum class KafkaStatsMode : uint8_t {
   kAll = 3,
 };
 
+enum class SnapshotOversizeStringPolicy : uint8_t {
+  kError = 0,
+  kSkip = 1,
+};
+
 class Conf {
  public:
   Conf() {
@@ -47,6 +52,9 @@ class Conf {
     kafka_stats_mode = KafkaStatsMode::kAggregated;
     pb_ack_delay_warn_ms = 10000;
     pb_idle_timeout_ms = 30000;
+    snapshot_oversize_list_tail_max_items = 0;
+    snapshot_oversize_shrink_batch = true;
+    snapshot_oversize_string_policy = SnapshotOversizeStringPolicy::kSkip;
     event_filter = nullptr;
   }
 
@@ -83,6 +91,9 @@ class Conf {
   KafkaStatsMode kafka_stats_mode;
   int64_t pb_ack_delay_warn_ms;
   int64_t pb_idle_timeout_ms;
+  size_t snapshot_oversize_list_tail_max_items;
+  bool snapshot_oversize_shrink_batch;
+  SnapshotOversizeStringPolicy snapshot_oversize_string_policy;
   std::shared_ptr<const EventFilter> event_filter;
 };
 

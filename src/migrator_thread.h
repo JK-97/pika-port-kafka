@@ -48,6 +48,8 @@ class MigratorThread : public net::Thread {
   }
 
   void DispatchRecord(const KafkaRecord& record);
+  bool SendListTailSnapshot(const std::string& key, const std::string& data_type);
+  bool IsPayloadTooLarge(const KafkaRecord& record) const;
 
   void MigrateDB();
   void MigrateStringsDB();

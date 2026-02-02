@@ -5,6 +5,7 @@
 
 // #include <glog/logging.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -142,6 +143,9 @@ void Usage() {
   std::cout << "\t-I     -- pb idle reconnect seconds (OPTIONAL default: 30, min: 1, 0 disables)" << std::endl;
   std::cout << "\t-F     -- event filter group or filter file (OPTIONAL, repeatable)" << std::endl;
   std::cout << "\t-X     -- global exclude key filters, comma separated (OPTIONAL)" << std::endl;
+  std::cout << "\t--snapshot_oversize_list_tail_max_items N (OPTIONAL default: 0)" << std::endl;
+  std::cout << "\t--snapshot_oversize_shrink_batch true|false (OPTIONAL default: true)" << std::endl;
+  std::cout << "\t--snapshot_oversize_string_policy skip|error (OPTIONAL default: skip)" << std::endl;
   std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 "
                "-k 127.0.0.1:9092 -M dual -S pika.snapshot -B pika.binlog -O __pika_port_kafka_offsets "
                "-x 4 -R auto -l ./log -r ./rsync_dump -b 512 -E true"
@@ -158,6 +162,17 @@ static const char* KafkaStatsModeToString(KafkaStatsMode mode) {
       return "detail";
     case KafkaStatsMode::kAll:
       return "all";
+    default:
+      return "unknown";
+  }
+}
+
+static const char* OversizeStringPolicyToString(SnapshotOversizeStringPolicy policy) {
+  switch (policy) {
+    case SnapshotOversizeStringPolicy::kError:
+      return "error";
+    case SnapshotOversizeStringPolicy::kSkip:
+      return "skip";
     default:
       return "unknown";
   }
@@ -182,6 +197,38 @@ static bool ParseKafkaStatsMode(const std::string& value, KafkaStatsMode* mode) 
   }
   if (lower == "all") {
     *mode = KafkaStatsMode::kAll;
+    return true;
+  }
+  return false;
+}
+
+static bool ParseBoolOption(const std::string& value, bool* out) {
+  std::string lower = value;
+  for (char& ch : lower) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  if (lower == "1" || lower == "true" || lower == "yes" || lower == "y") {
+    *out = true;
+    return true;
+  }
+  if (lower == "0" || lower == "false" || lower == "no" || lower == "n") {
+    *out = false;
+    return true;
+  }
+  return false;
+}
+
+static bool ParseOversizeStringPolicy(const std::string& value, SnapshotOversizeStringPolicy* policy) {
+  std::string lower = value;
+  for (char& ch : lower) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  if (lower == "skip") {
+    *policy = SnapshotOversizeStringPolicy::kSkip;
+    return true;
+  }
+  if (lower == "error") {
+    *policy = SnapshotOversizeStringPolicy::kError;
     return true;
   }
   return false;
@@ -271,6 +318,11 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Kafka_message_max_bytes:" << g_conf.kafka_message_max_bytes << std::endl;
   std::cout << "Pb_ack_delay_warn_ms:" << g_conf.pb_ack_delay_warn_ms << std::endl;
   std::cout << "Pb_idle_timeout_ms:" << g_conf.pb_idle_timeout_ms << std::endl;
+  std::cout << "Snapshot_oversize_list_tail_max_items:" << g_conf.snapshot_oversize_list_tail_max_items << std::endl;
+  std::cout << "Snapshot_oversize_shrink_batch:" << (g_conf.snapshot_oversize_shrink_batch ? "true" : "false")
+            << std::endl;
+  std::cout << "Snapshot_oversize_string_policy:" << OversizeStringPolicyToString(g_conf.snapshot_oversize_string_policy)
+            << std::endl;
   if (g_conf.event_filter) {
     g_conf.event_filter->Dump(std::cout);
   } else {
@@ -295,7 +347,20 @@ int main(int argc, char* argv[]) {
   bool offset_specified = false;
   std::vector<std::string> filter_group_args;
   std::vector<std::string> filter_exclude_args;
-  while (-1 != (c = getopt(argc, argv, "t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:F:X:edhk:c:S:B:T:O:P:M:U:D:E:R:Q:"))) {
+  enum LongOptionValues {
+    kLongSnapshotOversizeListTailMaxItems = 1000,
+    kLongSnapshotOversizeShrinkBatch,
+    kLongSnapshotOversizeStringPolicy,
+  };
+  static struct option long_options[] = {
+      {"snapshot_oversize_list_tail_max_items", required_argument, nullptr, kLongSnapshotOversizeListTailMaxItems},
+      {"snapshot_oversize_shrink_batch", required_argument, nullptr, kLongSnapshotOversizeShrinkBatch},
+      {"snapshot_oversize_string_policy", required_argument, nullptr, kLongSnapshotOversizeStringPolicy},
+      {nullptr, 0, nullptr, 0},
+  };
+  while (-1 != (c = getopt_long(argc, argv,
+                               "t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:F:X:edhk:c:S:B:T:O:P:M:U:D:E:R:Q:",
+                               long_options, nullptr))) {
     switch (c) {
       case 't':
         snprintf(buf, 1024, "%s", optarg);
@@ -467,6 +532,38 @@ int main(int argc, char* argv[]) {
         snprintf(buf, 1024, "%s", optarg);
         filter_exclude_args.emplace_back(buf);
         break;
+      case kLongSnapshotOversizeListTailMaxItems:
+        snprintf(buf, 1024, "%s", optarg);
+        pstd::string2int(buf, strlen(buf), &(num));
+        if (num < 0) {
+          fprintf(stderr, "Invalid snapshot_oversize_list_tail_max_items: %s\n", buf);
+          Usage();
+          exit(-1);
+        }
+        g_conf.snapshot_oversize_list_tail_max_items = static_cast<size_t>(num);
+        break;
+      case kLongSnapshotOversizeShrinkBatch: {
+        snprintf(buf, 1024, "%s", optarg);
+        bool enabled = false;
+        if (!ParseBoolOption(std::string(buf), &enabled)) {
+          fprintf(stderr, "Invalid snapshot_oversize_shrink_batch: %s\n", buf);
+          Usage();
+          exit(-1);
+        }
+        g_conf.snapshot_oversize_shrink_batch = enabled;
+        break;
+      }
+      case kLongSnapshotOversizeStringPolicy: {
+        snprintf(buf, 1024, "%s", optarg);
+        SnapshotOversizeStringPolicy policy;
+        if (!ParseOversizeStringPolicy(std::string(buf), &policy)) {
+          fprintf(stderr, "Invalid snapshot_oversize_string_policy: %s\n", buf);
+          Usage();
+          exit(-1);
+        }
+        g_conf.snapshot_oversize_string_policy = policy;
+        break;
+      }
       case 'e':
         g_conf.exit_if_dbsync = true;
         break;

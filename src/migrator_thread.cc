@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <glog/logging.h>
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <type_traits>
@@ -179,6 +180,12 @@ void MigratorThread::MigrateStringsDB() {
       }
       net::SerializeRedisCommand(argv, &cmd);
       KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+      if (IsPayloadTooLarge(record) &&
+          g_conf.snapshot_oversize_string_policy == SnapshotOversizeStringPolicy::kSkip) {
+        LOG(WARNING) << "snapshot string payload too large, skip key=" << k
+                     << " payload_size=" << record.payload.size();
+        continue;
+      }
       PlusNum();
       DispatchRecord(record);
     }
@@ -235,6 +242,12 @@ void MigratorThread::MigrateListsDB() {
           }
           net::SerializeRedisCommand(argv, &cmd);
           KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+          if (IsPayloadTooLarge(record) && g_conf.snapshot_oversize_list_tail_max_items > 0) {
+            LOG(WARNING) << "snapshot list payload too large, fallback to last "
+                         << g_conf.snapshot_oversize_list_tail_max_items << " entries, key=" << k;
+            SendListTailSnapshot(k, data_type);
+            break;
+          }
           PlusNum();
           DispatchRecord(record);
 
@@ -270,6 +283,64 @@ void MigratorThread::MigrateListsDB() {
   } while (cursor != 0 && !should_exit_);
 }
 
+bool MigratorThread::IsPayloadTooLarge(const KafkaRecord& record) const {
+  if (g_conf.kafka_message_max_bytes <= 0) {
+    return false;
+  }
+  return record.payload.size() > static_cast<size_t>(g_conf.kafka_message_max_bytes);
+}
+
+bool MigratorThread::SendListTailSnapshot(const std::string& key, const std::string& data_type) {
+  if (!db_) {
+    return false;
+  }
+  if (g_conf.snapshot_oversize_list_tail_max_items == 0) {
+    return false;
+  }
+  const size_t tail_max = g_conf.snapshot_oversize_list_tail_max_items;
+  std::vector<std::string> tail;
+  storage::Status s = db_->LRange(key, -static_cast<int64_t>(tail_max), -1, &tail);
+  if (!s.ok()) {
+    LOG(WARNING) << "db->LRange(key:" << key << ", pos:-" << tail_max << ", batch size:" << tail_max
+                 << ") = " << s.ToString();
+    return false;
+  }
+  if (tail.empty()) {
+    return true;
+  }
+
+  size_t idx = 0;
+  while (idx < tail.size() && !should_exit_) {
+    size_t remaining = tail.size() - idx;
+    size_t batch = std::min(tail_max, remaining);
+    while (batch > 0 && !should_exit_) {
+      net::RedisCmdArgsType argv;
+      std::string cmd;
+      argv.push_back("RPUSH");
+      argv.push_back(key);
+      for (size_t i = 0; i < batch; ++i) {
+        argv.push_back(tail[idx + i]);
+      }
+      net::SerializeRedisCommand(argv, &cmd);
+      KafkaRecord record = MakeSnapshotRecord(argv, data_type, key, cmd);
+      if (IsPayloadTooLarge(record)) {
+        if (batch == 1) {
+          LOG(WARNING) << "snapshot list tail entry too large, drop entry key=" << key
+                       << " payload_size=" << record.payload.size();
+          break;
+        }
+        batch = (batch + 1) / 2;
+        continue;
+      }
+      PlusNum();
+      DispatchRecord(record);
+      break;
+    }
+    idx += std::max<size_t>(1, batch);
+  }
+  return true;
+}
+
 void MigratorThread::MigrateHashesDB() {
   auto* db = db_;
   const std::string data_type = DataTypeName(type_);
@@ -302,26 +373,46 @@ void MigratorThread::MigrateHashesDB() {
           LOG(WARNING) << "db->HGetall(key:" << k << ") = " << s.ToString();
           continue;
         }
+        size_t index = 0;
+        while (!should_exit_ && index < fvs.size()) {
+          size_t batch = std::min(static_cast<size_t>(g_conf.sync_batch_num), fvs.size() - index);
+          size_t used = batch;
+          bool drop_key = false;
+          while (used > 0 && !should_exit_) {
+            net::RedisCmdArgsType argv;
+            std::string cmd;
 
-        auto it = fvs.begin();
-        while (!should_exit_ && it != fvs.end()) {
-          net::RedisCmdArgsType argv;
-          std::string cmd;
+            argv.push_back("HMSET");
+            argv.push_back(k);
+            for (size_t i = 0; i < used; ++i) {
+              const auto& fv = fvs[index + i];
+              argv.push_back(fv.field);
+              argv.push_back(fv.value);
+            }
 
-          argv.push_back("HMSET");
-          argv.push_back(k);
-          for (size_t idx = 0; idx < g_conf.sync_batch_num && !should_exit_ && it != fvs.end(); idx++, it++) {
-            argv.push_back(it->field);
-            argv.push_back(it->value);
-          }
-
-          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+              drop_key = true;
+              break;
+            }
+            net::SerializeRedisCommand(argv, &cmd);
+            KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+            if (g_conf.snapshot_oversize_shrink_batch && IsPayloadTooLarge(record)) {
+              if (used == 1) {
+                LOG(WARNING) << "snapshot hash entry too large, drop field key=" << k
+                             << " payload_size=" << record.payload.size();
+                break;
+              }
+              used = (used + 1) / 2;
+              continue;
+            }
+            PlusNum();
+            DispatchRecord(record);
             break;
           }
-          net::SerializeRedisCommand(argv, &cmd);
-          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-          PlusNum();
-          DispatchRecord(record);
+          if (drop_key) {
+            break;
+          }
+          index += std::max<size_t>(1, used);
         }
       }
 
@@ -379,24 +470,44 @@ void MigratorThread::MigrateSetsDB() {
           LOG(WARNING) << "db->SMembers(key:" << k << ") = " << s.ToString();
           continue;
         }
-        auto it = members.begin();
-        while (!should_exit_ && it != members.end()) {
-          std::string cmd;
-          net::RedisCmdArgsType argv;
+        size_t index = 0;
+        while (!should_exit_ && index < members.size()) {
+          size_t batch = std::min(static_cast<size_t>(g_conf.sync_batch_num), members.size() - index);
+          size_t used = batch;
+          bool drop_key = false;
+          while (used > 0 && !should_exit_) {
+            std::string cmd;
+            net::RedisCmdArgsType argv;
 
-          argv.push_back("SADD");
-          argv.push_back(k);
-          for (size_t idx = 0; idx < g_conf.sync_batch_num && !should_exit_ && it != members.end(); idx++, it++) {
-            argv.push_back(*it);
-          }
+            argv.push_back("SADD");
+            argv.push_back(k);
+            for (size_t i = 0; i < used; ++i) {
+              argv.push_back(members[index + i]);
+            }
 
-          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+            if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+              drop_key = true;
+              break;
+            }
+            net::SerializeRedisCommand(argv, &cmd);
+            KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+            if (g_conf.snapshot_oversize_shrink_batch && IsPayloadTooLarge(record)) {
+              if (used == 1) {
+                LOG(WARNING) << "snapshot set entry too large, drop member key=" << k
+                             << " payload_size=" << record.payload.size();
+                break;
+              }
+              used = (used + 1) / 2;
+              continue;
+            }
+            PlusNum();
+            DispatchRecord(record);
             break;
           }
-          net::SerializeRedisCommand(argv, &cmd);
-          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-          PlusNum();
-          DispatchRecord(record);
+          if (drop_key) {
+            break;
+          }
+          index += std::max<size_t>(1, used);
         }
       }
 
@@ -459,25 +570,48 @@ void MigratorThread::MigrateZsetsDB() {
         }
 
         while (s.ok() && !should_exit_ && !score_members.empty()) {
-          net::RedisCmdArgsType argv;
-          std::string cmd;
+          size_t index = 0;
+          while (!should_exit_ && index < score_members.size()) {
+            size_t batch = std::min(static_cast<size_t>(g_conf.sync_batch_num), score_members.size() - index);
+            size_t used = batch;
+            bool drop_key = false;
+            while (used > 0 && !should_exit_) {
+              net::RedisCmdArgsType argv;
+              std::string cmd;
 
-          argv.push_back("ZADD");
-          argv.push_back(k);
+              argv.push_back("ZADD");
+              argv.push_back(k);
 
-          for (const auto& sm : score_members) {
-            argv.push_back(std::to_string(sm.score));
-            argv.push_back(sm.member);
+              for (size_t i = 0; i < used; ++i) {
+                const auto& sm = score_members[index + i];
+                argv.push_back(std::to_string(sm.score));
+                argv.push_back(sm.member);
+              }
+
+              if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
+                drop_key = true;
+                break;
+              }
+              net::SerializeRedisCommand(argv, &cmd);
+              KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
+              if (g_conf.snapshot_oversize_shrink_batch && IsPayloadTooLarge(record)) {
+                if (used == 1) {
+                  LOG(WARNING) << "snapshot zset entry too large, drop member key=" << k
+                               << " payload_size=" << record.payload.size();
+                  break;
+                }
+                used = (used + 1) / 2;
+                continue;
+              }
+              PlusNum();
+              DispatchRecord(record);
+              break;
+            }
+            if (drop_key) {
+              break;
+            }
+            index += std::max<size_t>(1, used);
           }
-
-          if (!ShouldSendSnapshotEvent(argv, data_type, k)) {
-            break;
-          }
-          net::SerializeRedisCommand(argv, &cmd);
-          KafkaRecord record = MakeSnapshotRecord(argv, data_type, k, cmd);
-          PlusNum();
-          DispatchRecord(record);
-
           pos += g_conf.sync_batch_num;
           score_members.clear();
           s = db->ZRange(k, static_cast<int32_t>(pos),

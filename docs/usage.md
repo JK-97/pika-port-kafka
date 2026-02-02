@@ -74,6 +74,9 @@
 - `-e` 若遇到 dbsync wait 立即退出（可选）
 - `-H` 心跳日志间隔秒数（默认 `60`，最小 `1`，`0` 关闭）
 - `-J` Kafka producer `message.max.bytes`（默认 `1000000`）
+- `--snapshot_oversize_list_tail_max_items` list snapshot 超限时仅发送末尾 N 条（默认 `0`，关闭）
+- `--snapshot_oversize_shrink_batch` hash/set/zset snapshot 超限时自动缩小批次（默认 `true`）
+- `--snapshot_oversize_string_policy` string snapshot 超限策略：`skip|error`（默认 `skip`）
 - `-A` PB ack 延迟告警秒数（默认 `10`，最小 `1`，`0` 关闭）
 - `-I` PB 空闲自动重连秒数（默认 `30`，最小 `1`，`0` 关闭）
 - `-F` 事件过滤规则组（可重复）
@@ -82,6 +85,7 @@
 说明：
 
 - `-R auto` 会优先探测 PB 复制端口，失败则回退 legacy。
+- `--snapshot_oversize_*` 选项仅对 snapshot 生效，不影响 binlog。
 
 ## 4. 事件过滤
 
