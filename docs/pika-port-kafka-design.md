@@ -78,8 +78,10 @@
   "db": "db0",
   "slot": 0,
   "key": "user:1",
-  "args_b64": ["<base64>", "<base64>"],
-  "raw_resp_b64": "<base64 RESP command>",
+  "args": ["<arg>", "<arg>"],
+  "args_encoding": "base64|none",
+  "raw_resp": "<RESP command>",
+  "raw_resp_encoding": "base64|none",
   "ts_ms": 1700000000,
   "event_id": "1:12:34567:8899",
   "source_id": "10.0.0.1:9221",
@@ -103,9 +105,12 @@
 - `event_type`
   - `snapshot`：来自全量同步（dbsync）
   - `binlog`：来自增量同步（binlog）
-- `args_b64` 与 `raw_resp_b64`
-  - 避免二进制内容导致 JSON 非法
-  - 消费端可选择是否还原为原始命令
+- `args` / `raw_resp`
+  - 事件内容字段名固定（无论是否编码）
+- `raw_resp` 可通过配置关闭输出
+- `args_encoding` / `raw_resp_encoding`
+  - `base64|none`，用于标识字段编码方式
+  - `none` 代表未编码（可能包含二进制）
 - `event_id`
   - legacy：`server_id:filenum:offset:logic_id`
   - pb：`term_id:filenum:offset:logic_id`

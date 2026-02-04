@@ -19,6 +19,11 @@ enum class SnapshotOversizeStringPolicy : uint8_t {
   kSkip = 1,
 };
 
+enum class PayloadEncoding : uint8_t {
+  kBase64 = 0,
+  kNone = 1,
+};
+
 class Conf {
  public:
   Conf() {
@@ -55,6 +60,9 @@ class Conf {
     snapshot_oversize_list_tail_max_items = 0;
     snapshot_oversize_shrink_batch = true;
     snapshot_oversize_string_policy = SnapshotOversizeStringPolicy::kSkip;
+    args_encoding = PayloadEncoding::kBase64;
+    raw_resp_encoding = PayloadEncoding::kBase64;
+    include_raw_resp = true;
     event_filter = nullptr;
   }
 
@@ -94,6 +102,9 @@ class Conf {
   size_t snapshot_oversize_list_tail_max_items;
   bool snapshot_oversize_shrink_batch;
   SnapshotOversizeStringPolicy snapshot_oversize_string_policy;
+  PayloadEncoding args_encoding;
+  PayloadEncoding raw_resp_encoding;
+  bool include_raw_resp;
   std::shared_ptr<const EventFilter> event_filter;
 };
 

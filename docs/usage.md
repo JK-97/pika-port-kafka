@@ -77,6 +77,9 @@
 - `--snapshot_oversize_list_tail_max_items` list snapshot 超限时仅发送末尾 N 条（默认 `0`，关闭）
 - `--snapshot_oversize_shrink_batch` hash/set/zset snapshot 超限时自动缩小批次（默认 `true`）
 - `--snapshot_oversize_string_policy` string snapshot 超限策略：`skip|error`（默认 `skip`）
+- `--args_encoding` 事件 `args` 字段编码：`base64|none`（默认 `base64`）
+- `--raw_resp_encoding` 事件 `raw_resp` 字段编码：`base64|none`（默认 `base64`）
+- `--include_raw_resp` 是否输出 `raw_resp` 字段（`true|false`，默认 `true`）
 - `-A` PB ack 延迟告警秒数（默认 `10`，最小 `1`，`0` 关闭）
 - `-I` PB 空闲自动重连秒数（默认 `30`，最小 `1`，`0` 关闭）
 - `-F` 事件过滤规则组（可重复）
@@ -86,6 +89,7 @@
 
 - `-R auto` 会优先探测 PB 复制端口，失败则回退 legacy。
 - `--snapshot_oversize_*` 选项仅对 snapshot 生效，不影响 binlog。
+- `args/raw_resp` 选择 `none` 编码时将输出原始字符串，可能包含非 UTF-8/二进制数据。
 
 ## 4. 事件过滤
 

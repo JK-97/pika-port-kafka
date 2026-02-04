@@ -146,6 +146,9 @@ void Usage() {
   std::cout << "\t--snapshot_oversize_list_tail_max_items N (OPTIONAL default: 0)" << std::endl;
   std::cout << "\t--snapshot_oversize_shrink_batch true|false (OPTIONAL default: true)" << std::endl;
   std::cout << "\t--snapshot_oversize_string_policy skip|error (OPTIONAL default: skip)" << std::endl;
+  std::cout << "\t--args_encoding base64|none (OPTIONAL default: base64)" << std::endl;
+  std::cout << "\t--raw_resp_encoding base64|none (OPTIONAL default: base64)" << std::endl;
+  std::cout << "\t--include_raw_resp true|false (OPTIONAL default: true)" << std::endl;
   std::cout << "\texample: ./pika_port -t 127.0.0.1 -p 12345 -i 127.0.0.1 -o 9221 "
                "-k 127.0.0.1:9092 -M dual -S pika.snapshot -B pika.binlog -O __pika_port_kafka_offsets "
                "-x 4 -R auto -l ./log -r ./rsync_dump -b 512 -E true"
@@ -175,6 +178,17 @@ static const char* OversizeStringPolicyToString(SnapshotOversizeStringPolicy pol
       return "skip";
     default:
       return "unknown";
+  }
+}
+
+static const char* PayloadEncodingToString(PayloadEncoding encoding) {
+  switch (encoding) {
+    case PayloadEncoding::kBase64:
+      return "base64";
+    case PayloadEncoding::kNone:
+      return "none";
+    default:
+      return "none";
   }
 }
 
@@ -229,6 +243,22 @@ static bool ParseOversizeStringPolicy(const std::string& value, SnapshotOversize
   }
   if (lower == "error") {
     *policy = SnapshotOversizeStringPolicy::kError;
+    return true;
+  }
+  return false;
+}
+
+static bool ParsePayloadEncoding(const std::string& value, PayloadEncoding* encoding) {
+  std::string lower = value;
+  for (char& ch : lower) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  if (lower == "base64" || lower == "b64") {
+    *encoding = PayloadEncoding::kBase64;
+    return true;
+  }
+  if (lower == "none" || lower == "raw") {
+    *encoding = PayloadEncoding::kNone;
     return true;
   }
   return false;
@@ -323,6 +353,9 @@ void PrintInfo(const std::time_t& now) {
             << std::endl;
   std::cout << "Snapshot_oversize_string_policy:" << OversizeStringPolicyToString(g_conf.snapshot_oversize_string_policy)
             << std::endl;
+  std::cout << "Args_encoding:" << PayloadEncodingToString(g_conf.args_encoding) << std::endl;
+  std::cout << "Raw_resp_encoding:" << PayloadEncodingToString(g_conf.raw_resp_encoding) << std::endl;
+  std::cout << "Include_raw_resp:" << (g_conf.include_raw_resp ? "true" : "false") << std::endl;
   if (g_conf.event_filter) {
     g_conf.event_filter->Dump(std::cout);
   } else {
@@ -351,11 +384,17 @@ int main(int argc, char* argv[]) {
     kLongSnapshotOversizeListTailMaxItems = 1000,
     kLongSnapshotOversizeShrinkBatch,
     kLongSnapshotOversizeStringPolicy,
+    kLongArgsEncoding,
+    kLongRawRespEncoding,
+    kLongIncludeRawResp,
   };
   static struct option long_options[] = {
       {"snapshot_oversize_list_tail_max_items", required_argument, nullptr, kLongSnapshotOversizeListTailMaxItems},
       {"snapshot_oversize_shrink_batch", required_argument, nullptr, kLongSnapshotOversizeShrinkBatch},
       {"snapshot_oversize_string_policy", required_argument, nullptr, kLongSnapshotOversizeStringPolicy},
+      {"args_encoding", required_argument, nullptr, kLongArgsEncoding},
+      {"raw_resp_encoding", required_argument, nullptr, kLongRawRespEncoding},
+      {"include_raw_resp", required_argument, nullptr, kLongIncludeRawResp},
       {nullptr, 0, nullptr, 0},
   };
   while (-1 != (c = getopt_long(argc, argv,
@@ -562,6 +601,39 @@ int main(int argc, char* argv[]) {
           exit(-1);
         }
         g_conf.snapshot_oversize_string_policy = policy;
+        break;
+      }
+      case kLongArgsEncoding: {
+        snprintf(buf, 1024, "%s", optarg);
+        PayloadEncoding encoding;
+        if (!ParsePayloadEncoding(std::string(buf), &encoding)) {
+          fprintf(stderr, "Invalid args_encoding: %s\n", buf);
+          Usage();
+          exit(-1);
+        }
+        g_conf.args_encoding = encoding;
+        break;
+      }
+      case kLongRawRespEncoding: {
+        snprintf(buf, 1024, "%s", optarg);
+        PayloadEncoding encoding;
+        if (!ParsePayloadEncoding(std::string(buf), &encoding)) {
+          fprintf(stderr, "Invalid raw_resp_encoding: %s\n", buf);
+          Usage();
+          exit(-1);
+        }
+        g_conf.raw_resp_encoding = encoding;
+        break;
+      }
+      case kLongIncludeRawResp: {
+        snprintf(buf, 1024, "%s", optarg);
+        bool enabled = false;
+        if (!ParseBoolOption(std::string(buf), &enabled)) {
+          fprintf(stderr, "Invalid include_raw_resp: %s\n", buf);
+          Usage();
+          exit(-1);
+        }
+        g_conf.include_raw_resp = enabled;
         break;
       }
       case 'e':

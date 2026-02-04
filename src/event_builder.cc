@@ -6,6 +6,7 @@
 #include <sstream>
 #include <unordered_set>
 
+#include "conf.h"
 #include "json_utils.h"
 
 namespace {
@@ -44,16 +45,45 @@ void AppendJsonNumber(std::string* out, const std::string& key, uint64_t value, 
   out->append(std::to_string(value));
 }
 
-std::string BuildArgsB64Json(const net::RedisCmdArgsType& argv) {
+void AppendJsonArray(std::string* out, const std::string& key, const std::string& array_json, bool* first) {
+  if (!*first) {
+    out->append(",");
+  }
+  *first = false;
+  out->append("\"");
+  out->append(key);
+  out->append("\":");
+  out->append(array_json);
+}
+
+const char* PayloadEncodingToString(PayloadEncoding encoding) {
+  switch (encoding) {
+    case PayloadEncoding::kBase64:
+      return "base64";
+    case PayloadEncoding::kNone:
+      return "none";
+    default:
+      return "none";
+  }
+}
+
+std::string EncodePayload(const std::string& input, PayloadEncoding encoding) {
+  if (encoding == PayloadEncoding::kBase64) {
+    return Base64Encode(input);
+  }
+  return input;
+}
+
+std::string BuildArgsJson(const net::RedisCmdArgsType& argv, PayloadEncoding encoding) {
   std::string out;
   out.append("[");
   for (size_t i = 0; i < argv.size(); ++i) {
     if (i > 0) {
       out.append(",");
     }
-    std::string encoded = Base64Encode(argv[i]);
+    std::string encoded = EncodePayload(argv[i], encoding);
     out.append("\"");
-    out.append(encoded);
+    out.append(JsonEscape(encoded));
     out.append("\"");
   }
   out.append("]");
@@ -141,9 +171,12 @@ std::string BuildSnapshotEventJson(const net::RedisCmdArgsType& argv,
   AppendJsonString(&out, "db", db_name, &first);
   AppendJsonNumber(&out, "slot", 0, &first);
   AppendJsonString(&out, "key", key, &first);
-  out.append(",\"args_b64\":");
-  out.append(BuildArgsB64Json(argv));
-  AppendJsonString(&out, "raw_resp_b64", Base64Encode(raw_resp), &first);
+  AppendJsonArray(&out, "args", BuildArgsJson(argv, g_conf.args_encoding), &first);
+  AppendJsonString(&out, "args_encoding", PayloadEncodingToString(g_conf.args_encoding), &first);
+  if (g_conf.include_raw_resp) {
+    AppendJsonString(&out, "raw_resp", EncodePayload(raw_resp, g_conf.raw_resp_encoding), &first);
+    AppendJsonString(&out, "raw_resp_encoding", PayloadEncodingToString(g_conf.raw_resp_encoding), &first);
+  }
   AppendJsonNumber(&out, "ts_ms", NowMillis(), &first);
   AppendJsonString(&out, "event_id", "snapshot:" + db_name + ":" + data_type + ":" + key, &first);
   AppendJsonString(&out, "source_id", source_id, &first);
@@ -171,9 +204,12 @@ std::string BuildBinlogEventJson(const net::RedisCmdArgsType& argv,
   AppendJsonString(&out, "db", db_name, &first);
   AppendJsonNumber(&out, "slot", 0, &first);
   AppendJsonString(&out, "key", key, &first);
-  out.append(",\"args_b64\":");
-  out.append(BuildArgsB64Json(argv));
-  AppendJsonString(&out, "raw_resp_b64", Base64Encode(raw_resp), &first);
+  AppendJsonArray(&out, "args", BuildArgsJson(argv, g_conf.args_encoding), &first);
+  AppendJsonString(&out, "args_encoding", PayloadEncodingToString(g_conf.args_encoding), &first);
+  if (g_conf.include_raw_resp) {
+    AppendJsonString(&out, "raw_resp", EncodePayload(raw_resp, g_conf.raw_resp_encoding), &first);
+    AppendJsonString(&out, "raw_resp_encoding", PayloadEncodingToString(g_conf.raw_resp_encoding), &first);
+  }
   AppendJsonNumber(&out, "ts_ms", static_cast<uint64_t>(item.exec_time()) * 1000, &first);
   std::string event_id = std::to_string(item.server_id()) + ":" + std::to_string(item.filenum()) + ":" +
                          std::to_string(item.offset()) + ":" + std::to_string(item.logic_id());
@@ -213,9 +249,12 @@ std::string BuildBinlogEventJson(const net::RedisCmdArgsType& argv,
   AppendJsonString(&out, "db", db_name, &first);
   AppendJsonNumber(&out, "slot", 0, &first);
   AppendJsonString(&out, "key", key, &first);
-  out.append(",\"args_b64\":");
-  out.append(BuildArgsB64Json(argv));
-  AppendJsonString(&out, "raw_resp_b64", Base64Encode(raw_resp), &first);
+  AppendJsonArray(&out, "args", BuildArgsJson(argv, g_conf.args_encoding), &first);
+  AppendJsonString(&out, "args_encoding", PayloadEncodingToString(g_conf.args_encoding), &first);
+  if (g_conf.include_raw_resp) {
+    AppendJsonString(&out, "raw_resp", EncodePayload(raw_resp, g_conf.raw_resp_encoding), &first);
+    AppendJsonString(&out, "raw_resp_encoding", PayloadEncodingToString(g_conf.raw_resp_encoding), &first);
+  }
   AppendJsonNumber(&out, "ts_ms", static_cast<uint64_t>(item.exec_time()) * 1000, &first);
   std::string event_id = std::to_string(item.term_id()) + ":" + std::to_string(item.filenum()) + ":" +
                          std::to_string(item.offset()) + ":" + std::to_string(item.logic_id());
