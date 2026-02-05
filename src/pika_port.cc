@@ -12,6 +12,7 @@
 #include <chrono>
 #include <memory>
 #include <string_view>
+#include <utility>
 
 #include <glog/logging.h>
 #include <functional>
@@ -21,6 +22,7 @@
 #include "event_filter.h"
 #include "event_builder.h"
 #include "net/include/net_cli.h"
+#include "pikiwi_info.h"
 #include "pika_port.h"
 #include "pstd/include/env.h"
 #include "pstd/include/rsync.h"
@@ -154,17 +156,31 @@ void PikaPort::StopHeartbeat() {
 
 void PikaPort::LogHeartbeat() {
   std::string protocol = use_pb_sync_ ? "pb" : "legacy";
+  std::string master_lag = "unknown";
+  if (!g_conf.master_ip.empty() && g_conf.master_port > 0) {
+    ReplicationInfo info;
+    std::string err;
+    if (FetchReplicationInfo(g_conf.master_ip, g_conf.master_port, g_conf.passwd, &info, &err)) {
+      if (info.has_master_lag) {
+        master_lag = std::to_string(info.master_lag);
+      }
+    } else if (!err.empty()) {
+      LOG(WARNING) << "Heartbeat: fetch master_lag failed: " << err;
+    }
+  }
   Checkpoint cp;
   if (checkpoint_manager_ && checkpoint_manager_->GetLast(&cp)) {
     LOG(INFO) << "Heartbeat: protocol=" << protocol
               << " stream=" << g_conf.kafka_stream_mode
               << " checkpoint=" << cp.filenum << ":" << cp.offset
               << " logic_id=" << cp.logic_id
-              << " ts_ms=" << cp.ts_ms;
+              << " ts_ms=" << cp.ts_ms
+              << " master_lag=" << master_lag;
   } else {
     LOG(INFO) << "Heartbeat: protocol=" << protocol
               << " stream=" << g_conf.kafka_stream_mode
-              << " checkpoint=none";
+              << " checkpoint=none"
+              << " master_lag=" << master_lag;
   }
 }
 
@@ -484,6 +500,18 @@ int PikaPort::PublishBinlogEvent(const net::RedisCmdArgsType& argv,
     idx = std::hash<std::string>()(record.key) % senders_.size();
   }
   senders_[idx]->Enqueue(record);
+  return 0;
+}
+
+int PikaPort::EnqueueKafkaRecord(KafkaRecord record) {
+  if (senders_.empty()) {
+    return -1;
+  }
+  size_t idx = 0;
+  if (!record.key.empty()) {
+    idx = std::hash<std::string>()(record.key) % senders_.size();
+  }
+  senders_[idx]->Enqueue(std::move(record));
   return 0;
 }
 

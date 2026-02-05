@@ -9,9 +9,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <cerrno>
 #include <cctype>
 #include <csignal>
 #include <fstream>
+#include <cstdlib>
 #include <random>
 #include <string_view>
 #include <vector>
@@ -21,6 +23,7 @@
 #include "checkpoint.h"
 #include "conf.h"
 #include "event_filter.h"
+#include "pikiwi_info.h"
 #include "pika_port.h"
 
 Conf g_conf;
@@ -107,6 +110,7 @@ void Usage() {
   std::cout << "Usage: " << std::endl;
   std::cout << "\tPika_port_kafka reads data from pika 3.0 and send to kafka" << std::endl;
   std::cout << "\t-h     -- show this help" << std::endl;
+  std::cout << "\t-C, --config=PATH  -- config file path (key=value)" << std::endl;
   std::cout << "\t-t     -- local host ip(OPTIONAL default: 127.0.0.1)" << std::endl;
   std::cout << "\t-p     -- local port(OPTIONAL)" << std::endl;
   std::cout << "\t-i     -- master ip(OPTIONAL default: 127.0.0.1)" << std::endl;
@@ -143,6 +147,9 @@ void Usage() {
   std::cout << "\t-I     -- pb idle reconnect seconds (OPTIONAL default: 30, min: 1, 0 disables)" << std::endl;
   std::cout << "\t-F     -- event filter group or filter file (OPTIONAL, repeatable)" << std::endl;
   std::cout << "\t-X     -- global exclude key filters, comma separated (OPTIONAL)" << std::endl;
+  std::cout << "\t--binlog_workers N (OPTIONAL default: 4)" << std::endl;
+  std::cout << "\t--binlog_queue_size N (OPTIONAL default: 4096)" << std::endl;
+  std::cout << "\t--start_from_master true|false (OPTIONAL default: false)" << std::endl;
   std::cout << "\t--snapshot_oversize_list_tail_max_items N (OPTIONAL default: 0)" << std::endl;
   std::cout << "\t--snapshot_oversize_shrink_batch true|false (OPTIONAL default: true)" << std::endl;
   std::cout << "\t--snapshot_oversize_string_policy skip|error (OPTIONAL default: skip)" << std::endl;
@@ -276,6 +283,451 @@ static std::string TrimString(std::string_view value) {
   return std::string(value.substr(start, end - start));
 }
 
+static std::string ToLower(std::string_view value) {
+  std::string out;
+  out.reserve(value.size());
+  for (char ch : value) {
+    out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  }
+  return out;
+}
+
+struct ConfigFileResult {
+  bool filenum_specified{false};
+  bool offset_specified{false};
+  std::vector<std::string> filter_group_args;
+  std::vector<std::string> filter_exclude_args;
+};
+
+static bool ParseInt64(const std::string& value, int64_t* out) {
+  if (!out) {
+    return false;
+  }
+  errno = 0;
+  char* end = nullptr;
+  long long num = std::strtoll(value.c_str(), &end, 10);
+  if (errno == ERANGE || end == value.c_str() || *end != '\0') {
+    return false;
+  }
+  *out = static_cast<int64_t>(num);
+  return true;
+}
+
+static void NormalizePath(std::string* path) {
+  if (!path) {
+    return;
+  }
+  if (!path->empty() && path->back() != '/') {
+    path->push_back('/');
+  }
+}
+
+static bool ApplyConfigValue(const std::string& key,
+                             const std::string& value,
+                             ConfigFileResult* result,
+                             std::vector<std::string>* warnings) {
+  std::string lower = ToLower(key);
+  int64_t num = 0;
+  if (lower == "filter") {
+    if (result) {
+      result->filter_group_args.push_back(value);
+    }
+    return true;
+  }
+  if (lower == "exclude" || lower == "exclude_keys") {
+    if (result) {
+      result->filter_exclude_args.push_back(value);
+    }
+    return true;
+  }
+
+  if (lower == "local_ip") {
+    g_conf.local_ip = value;
+    return true;
+  }
+  if (lower == "local_port") {
+    if (!ParseInt64(value, &num) || num < 0) {
+      return false;
+    }
+    g_conf.local_port = static_cast<int>(num);
+    return true;
+  }
+  if (lower == "master_ip") {
+    g_conf.master_ip = value;
+    return true;
+  }
+  if (lower == "master_port") {
+    if (!ParseInt64(value, &num) || num < 0) {
+      return false;
+    }
+    g_conf.master_port = static_cast<int>(num);
+    return true;
+  }
+  if (lower == "passwd" || lower == "password" || lower == "master_password") {
+    g_conf.passwd = value;
+    return true;
+  }
+  if (lower == "filenum") {
+    if (!ParseInt64(value, &num) || num < 0) {
+      return false;
+    }
+    g_conf.filenum = static_cast<size_t>(num);
+    if (result) {
+      result->filenum_specified = true;
+    }
+    return true;
+  }
+  if (lower == "offset") {
+    if (!ParseInt64(value, &num) || num < 0) {
+      return false;
+    }
+    g_conf.offset = static_cast<size_t>(num);
+    if (result) {
+      result->offset_specified = true;
+    }
+    return true;
+  }
+  if (lower == "log_path") {
+    g_conf.log_path = value;
+    NormalizePath(&g_conf.log_path);
+    return true;
+  }
+  if (lower == "dump_path") {
+    g_conf.dump_path = value;
+    NormalizePath(&g_conf.dump_path);
+    return true;
+  }
+  if (lower == "sync_batch_num") {
+    if (!ParseInt64(value, &num) || num <= 0) {
+      return false;
+    }
+    g_conf.sync_batch_num = static_cast<size_t>(num);
+    return true;
+  }
+  if (lower == "wait_bgsave_timeout") {
+    if (!ParseInt64(value, &num) || num <= 0) {
+      return false;
+    }
+    g_conf.wait_bgsave_timeout = static_cast<time_t>(num);
+    return true;
+  }
+  if (lower == "wait_bgsave_timeout_sec") {
+    if (!ParseInt64(value, &num) || num <= 0) {
+      return false;
+    }
+    g_conf.wait_bgsave_timeout = static_cast<time_t>(num);
+    return true;
+  }
+  if (lower == "exit_if_dbsync") {
+    bool enabled = false;
+    if (!ParseBoolOption(value, &enabled)) {
+      return false;
+    }
+    g_conf.exit_if_dbsync = enabled;
+    return true;
+  }
+  if (lower == "kafka_brokers") {
+    g_conf.kafka_brokers = value;
+    return true;
+  }
+  if (lower == "kafka_client_id") {
+    g_conf.kafka_client_id = value;
+    return true;
+  }
+  if (lower == "kafka_topic_snapshot") {
+    g_conf.kafka_topic_snapshot = value;
+    return true;
+  }
+  if (lower == "kafka_topic_binlog") {
+    g_conf.kafka_topic_binlog = value;
+    return true;
+  }
+  if (lower == "kafka_topic_single") {
+    g_conf.kafka_topic_single = value;
+    return true;
+  }
+  if (lower == "kafka_topic_offsets") {
+    g_conf.kafka_topic_offsets = value;
+    return true;
+  }
+  if (lower == "kafka_offsets_enabled") {
+    bool enabled = false;
+    if (!ParseBoolOption(value, &enabled)) {
+      return false;
+    }
+    g_conf.kafka_offsets_enabled = enabled;
+    return true;
+  }
+  if (lower == "checkpoint_path") {
+    g_conf.checkpoint_path = value;
+    return true;
+  }
+  if (lower == "source_id") {
+    g_conf.source_id = value;
+    return true;
+  }
+  if (lower == "db_name") {
+    g_conf.db_name = value;
+    return true;
+  }
+  if (lower == "kafka_enable_idempotence") {
+    bool enabled = false;
+    if (!ParseBoolOption(value, &enabled)) {
+      return false;
+    }
+    g_conf.kafka_enable_idempotence = enabled;
+    return true;
+  }
+  if (lower == "kafka_stream_mode") {
+    g_conf.kafka_stream_mode = value;
+    return true;
+  }
+  if (lower == "sync_protocol") {
+    g_conf.sync_protocol = value;
+    return true;
+  }
+  if (lower == "heartbeat_interval") {
+    if (!ParseInt64(value, &num)) {
+      return false;
+    }
+    if (num <= 0) {
+      g_conf.heartbeat_interval_ms = 0;
+    } else {
+      g_conf.heartbeat_interval_ms = static_cast<int64_t>(num) * 1000;
+    }
+    return true;
+  }
+  if (lower == "heartbeat_interval_sec") {
+    if (!ParseInt64(value, &num)) {
+      return false;
+    }
+    if (num <= 0) {
+      g_conf.heartbeat_interval_ms = 0;
+    } else {
+      g_conf.heartbeat_interval_ms = static_cast<int64_t>(num) * 1000;
+    }
+    return true;
+  }
+  if (lower == "kafka_message_max_bytes") {
+    if (!ParseInt64(value, &num) || num <= 0) {
+      return false;
+    }
+    g_conf.kafka_message_max_bytes = static_cast<int64_t>(num);
+    return true;
+  }
+  if (lower == "kafka_sender_threads") {
+    if (!ParseInt64(value, &num) || num <= 0) {
+      return false;
+    }
+    g_conf.kafka_sender_threads = static_cast<int>(num);
+    return true;
+  }
+  if (lower == "kafka_stats_mode") {
+    KafkaStatsMode mode;
+    if (!ParseKafkaStatsMode(value, &mode)) {
+      return false;
+    }
+    g_conf.kafka_stats_mode = mode;
+    return true;
+  }
+  if (lower == "binlog_workers") {
+    if (!ParseInt64(value, &num) || num <= 0) {
+      return false;
+    }
+    g_conf.binlog_workers = static_cast<int>(num);
+    return true;
+  }
+  if (lower == "binlog_queue_size") {
+    if (!ParseInt64(value, &num) || num <= 0) {
+      return false;
+    }
+    g_conf.binlog_queue_size = static_cast<size_t>(num);
+    return true;
+  }
+  if (lower == "pb_ack_delay_warn") {
+    if (!ParseInt64(value, &num)) {
+      return false;
+    }
+    if (num <= 0) {
+      g_conf.pb_ack_delay_warn_ms = 0;
+    } else {
+      g_conf.pb_ack_delay_warn_ms = static_cast<int64_t>(num) * 1000;
+    }
+    return true;
+  }
+  if (lower == "pb_ack_delay_warn_sec") {
+    if (!ParseInt64(value, &num)) {
+      return false;
+    }
+    if (num <= 0) {
+      g_conf.pb_ack_delay_warn_ms = 0;
+    } else {
+      g_conf.pb_ack_delay_warn_ms = static_cast<int64_t>(num) * 1000;
+    }
+    return true;
+  }
+  if (lower == "pb_idle_timeout") {
+    if (!ParseInt64(value, &num)) {
+      return false;
+    }
+    if (num <= 0) {
+      g_conf.pb_idle_timeout_ms = 0;
+    } else {
+      g_conf.pb_idle_timeout_ms = static_cast<int64_t>(num) * 1000;
+    }
+    return true;
+  }
+  if (lower == "pb_idle_timeout_sec") {
+    if (!ParseInt64(value, &num)) {
+      return false;
+    }
+    if (num <= 0) {
+      g_conf.pb_idle_timeout_ms = 0;
+    } else {
+      g_conf.pb_idle_timeout_ms = static_cast<int64_t>(num) * 1000;
+    }
+    return true;
+  }
+  if (lower == "snapshot_oversize_list_tail_max_items") {
+    if (!ParseInt64(value, &num) || num < 0) {
+      return false;
+    }
+    g_conf.snapshot_oversize_list_tail_max_items = static_cast<size_t>(num);
+    return true;
+  }
+  if (lower == "snapshot_oversize_shrink_batch") {
+    bool enabled = false;
+    if (!ParseBoolOption(value, &enabled)) {
+      return false;
+    }
+    g_conf.snapshot_oversize_shrink_batch = enabled;
+    return true;
+  }
+  if (lower == "snapshot_oversize_string_policy") {
+    SnapshotOversizeStringPolicy policy;
+    if (!ParseOversizeStringPolicy(value, &policy)) {
+      return false;
+    }
+    g_conf.snapshot_oversize_string_policy = policy;
+    return true;
+  }
+  if (lower == "args_encoding") {
+    PayloadEncoding encoding;
+    if (!ParsePayloadEncoding(value, &encoding)) {
+      return false;
+    }
+    g_conf.args_encoding = encoding;
+    return true;
+  }
+  if (lower == "raw_resp_encoding") {
+    PayloadEncoding encoding;
+    if (!ParsePayloadEncoding(value, &encoding)) {
+      return false;
+    }
+    g_conf.raw_resp_encoding = encoding;
+    return true;
+  }
+  if (lower == "include_raw_resp") {
+    bool enabled = false;
+    if (!ParseBoolOption(value, &enabled)) {
+      return false;
+    }
+    g_conf.include_raw_resp = enabled;
+    return true;
+  }
+  if (lower == "start_from_master") {
+    bool enabled = false;
+    if (!ParseBoolOption(value, &enabled)) {
+      return false;
+    }
+    g_conf.start_from_master = enabled;
+    return true;
+  }
+  if (lower == "vlog_level") {
+    if (ParseInt64(value, &num)) {
+      FLAGS_v = static_cast<int>(num);
+    } else if (warnings) {
+      warnings->push_back("Invalid vlog_level: " + value);
+    }
+    return true;
+  }
+
+  if (warnings) {
+    warnings->push_back("Unknown config key: " + key);
+  }
+  return true;
+}
+
+static bool LoadConfigFile(const std::string& path,
+                           ConfigFileResult* result,
+                           std::vector<std::string>* warnings) {
+  if (path.empty()) {
+    return true;
+  }
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    if (warnings) {
+      warnings->push_back("config file not found: " + path);
+    }
+    return false;
+  }
+  std::string line;
+  int lineno = 0;
+  while (std::getline(in, line)) {
+    lineno++;
+    std::string trimmed = TrimString(line);
+    if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';') {
+      continue;
+    }
+    size_t pos = trimmed.find('=');
+    if (pos == std::string::npos) {
+      if (warnings) {
+        warnings->push_back("config parse error line " + std::to_string(lineno) + ": missing '='");
+      }
+      continue;
+    }
+    std::string key = TrimString(trimmed.substr(0, pos));
+    std::string value = TrimString(trimmed.substr(pos + 1));
+    if (key.empty()) {
+      if (warnings) {
+        warnings->push_back("config parse error line " + std::to_string(lineno) + ": empty key");
+      }
+      continue;
+    }
+    if (!ApplyConfigValue(key, value, result, warnings)) {
+      if (warnings) {
+        warnings->push_back("config parse error line " + std::to_string(lineno) + ": " + key);
+      }
+    }
+  }
+  return true;
+}
+
+static bool ExtractConfigPath(int argc, char* argv[], std::string* path, std::string* err) {
+  if (!path) {
+    return false;
+  }
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "-C" || arg == "--config") {
+      if (i + 1 >= argc) {
+        if (err) {
+          *err = "missing value for --config";
+        }
+        return false;
+      }
+      *path = argv[i + 1];
+      return true;
+    }
+    const std::string prefix = "--config=";
+    if (arg.compare(0, prefix.size(), prefix) == 0) {
+      *path = arg.substr(prefix.size());
+      return true;
+    }
+  }
+  return true;
+}
+
 static void LoadFilterFile(const std::string& path,
                            std::vector<std::string>* groups,
                            std::vector<std::string>* warnings) {
@@ -348,6 +800,8 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Kafka_message_max_bytes:" << g_conf.kafka_message_max_bytes << std::endl;
   std::cout << "Pb_ack_delay_warn_ms:" << g_conf.pb_ack_delay_warn_ms << std::endl;
   std::cout << "Pb_idle_timeout_ms:" << g_conf.pb_idle_timeout_ms << std::endl;
+  std::cout << "Binlog_workers:" << g_conf.binlog_workers << std::endl;
+  std::cout << "Binlog_queue_size:" << g_conf.binlog_queue_size << std::endl;
   std::cout << "Snapshot_oversize_list_tail_max_items:" << g_conf.snapshot_oversize_list_tail_max_items << std::endl;
   std::cout << "Snapshot_oversize_shrink_batch:" << (g_conf.snapshot_oversize_shrink_batch ? "true" : "false")
             << std::endl;
@@ -356,6 +810,7 @@ void PrintInfo(const std::time_t& now) {
   std::cout << "Args_encoding:" << PayloadEncodingToString(g_conf.args_encoding) << std::endl;
   std::cout << "Raw_resp_encoding:" << PayloadEncodingToString(g_conf.raw_resp_encoding) << std::endl;
   std::cout << "Include_raw_resp:" << (g_conf.include_raw_resp ? "true" : "false") << std::endl;
+  std::cout << "Start_from_master:" << (g_conf.start_from_master ? "true" : "false") << std::endl;
   if (g_conf.event_filter) {
     g_conf.event_filter->Dump(std::cout);
   } else {
@@ -378,6 +833,10 @@ int main(int argc, char* argv[]) {
   long num = 0;
   bool filenum_specified = false;
   bool offset_specified = false;
+  std::string config_path;
+  std::string config_err;
+  ConfigFileResult config_result;
+  std::vector<std::string> config_warnings;
   std::vector<std::string> filter_group_args;
   std::vector<std::string> filter_exclude_args;
   enum LongOptionValues {
@@ -387,20 +846,52 @@ int main(int argc, char* argv[]) {
     kLongArgsEncoding,
     kLongRawRespEncoding,
     kLongIncludeRawResp,
+    kLongBinlogWorkers,
+    kLongBinlogQueueSize,
+    kLongStartFromMaster,
   };
   static struct option long_options[] = {
+      {"config", required_argument, nullptr, 'C'},
       {"snapshot_oversize_list_tail_max_items", required_argument, nullptr, kLongSnapshotOversizeListTailMaxItems},
       {"snapshot_oversize_shrink_batch", required_argument, nullptr, kLongSnapshotOversizeShrinkBatch},
       {"snapshot_oversize_string_policy", required_argument, nullptr, kLongSnapshotOversizeStringPolicy},
       {"args_encoding", required_argument, nullptr, kLongArgsEncoding},
       {"raw_resp_encoding", required_argument, nullptr, kLongRawRespEncoding},
       {"include_raw_resp", required_argument, nullptr, kLongIncludeRawResp},
+      {"binlog_workers", required_argument, nullptr, kLongBinlogWorkers},
+      {"binlog_queue_size", required_argument, nullptr, kLongBinlogQueueSize},
+      {"start_from_master", required_argument, nullptr, kLongStartFromMaster},
       {nullptr, 0, nullptr, 0},
   };
+
+  if (!ExtractConfigPath(argc, argv, &config_path, &config_err)) {
+    if (!config_err.empty()) {
+      fprintf(stderr, "%s\n", config_err.c_str());
+    }
+    Usage();
+    return -1;
+  }
+  if (!config_path.empty()) {
+    if (!LoadConfigFile(config_path, &config_result, &config_warnings)) {
+      for (const auto& warning : config_warnings) {
+        fprintf(stderr, "Config: %s\n", warning.c_str());
+      }
+      fprintf(stderr, "Failed to load config file: %s\n", config_path.c_str());
+      return -1;
+    }
+  }
+  filenum_specified = config_result.filenum_specified;
+  offset_specified = config_result.offset_specified;
+  filter_group_args = config_result.filter_group_args;
+  filter_exclude_args = config_result.filter_exclude_args;
   while (-1 != (c = getopt_long(argc, argv,
-                               "t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:F:X:edhk:c:S:B:T:O:P:M:U:D:E:R:Q:",
+                               "C:t:p:i:o:f:s:w:r:l:x:G:z:b:H:J:A:I:F:X:edhk:c:S:B:T:O:P:M:U:D:E:R:Q:",
                                long_options, nullptr))) {
     switch (c) {
+      case 'C':
+        snprintf(buf, 1024, "%s", optarg);
+        config_path = std::string(buf);
+        break;
       case 't':
         snprintf(buf, 1024, "%s", optarg);
         g_conf.local_ip = std::string(buf);
@@ -636,6 +1127,31 @@ int main(int argc, char* argv[]) {
         g_conf.include_raw_resp = enabled;
         break;
       }
+      case kLongBinlogWorkers:
+        snprintf(buf, 1024, "%s", optarg);
+        pstd::string2int(buf, strlen(buf), &(num));
+        if (num > 0) {
+          g_conf.binlog_workers = static_cast<int>(num);
+        }
+        break;
+      case kLongBinlogQueueSize:
+        snprintf(buf, 1024, "%s", optarg);
+        pstd::string2int(buf, strlen(buf), &(num));
+        if (num > 0) {
+          g_conf.binlog_queue_size = static_cast<size_t>(num);
+        }
+        break;
+      case kLongStartFromMaster: {
+        snprintf(buf, 1024, "%s", optarg);
+        bool enabled = false;
+        if (!ParseBoolOption(std::string(buf), &enabled)) {
+          fprintf(stderr, "Invalid start_from_master: %s\n", buf);
+          Usage();
+          exit(-1);
+        }
+        g_conf.start_from_master = enabled;
+        break;
+      }
       case 'e':
         g_conf.exit_if_dbsync = true;
         break;
@@ -675,6 +1191,9 @@ int main(int argc, char* argv[]) {
   }
 
   GlogInit(g_conf.log_path, is_daemon);
+  for (const auto& warning : config_warnings) {
+    LOG(WARNING) << "Config: " << warning;
+  }
   if (heartbeat_clamped) {
     LOG(WARNING) << "Heartbeat interval too small, set to " << g_conf.heartbeat_interval_ms << "ms";
   }
@@ -696,6 +1215,43 @@ int main(int argc, char* argv[]) {
   }
   if (g_conf.sync_protocol != "auto" && g_conf.sync_protocol != "legacy" && g_conf.sync_protocol != "pb") {
     g_conf.sync_protocol = "auto";
+  }
+  if (g_conf.binlog_workers <= 0) {
+    g_conf.binlog_workers = 1;
+  }
+  if (g_conf.binlog_queue_size == 0) {
+    g_conf.binlog_queue_size = 1024;
+  }
+
+  if ((filenum_specified || offset_specified) && g_conf.start_from_master) {
+    LOG(WARNING) << "start_from_master ignored because filenum/offset specified";
+    g_conf.start_from_master = false;
+  }
+  if (g_conf.start_from_master) {
+    ReplicationInfo info;
+    std::string err;
+    if (!FetchReplicationInfo(g_conf.master_ip, g_conf.master_port, g_conf.passwd, &info, &err) ||
+        !info.has_binlog_offset) {
+      LOG(ERROR) << "Failed to fetch master binlog_offset: " << err;
+      return -1;
+    }
+    g_conf.filenum = info.filenum;
+    g_conf.offset = info.offset;
+    filenum_specified = true;
+    offset_specified = true;
+    Checkpoint cp;
+    cp.filenum = info.filenum;
+    cp.offset = info.offset;
+    cp.logic_id = 0;
+    cp.server_id = 0;
+    cp.term_id = 0;
+    cp.ts_ms = 0;
+    CheckpointManager checkpoint_manager(g_conf.checkpoint_path, g_conf.source_id,
+                                         g_conf.kafka_topic_offsets, g_conf.kafka_brokers,
+                                         g_conf.kafka_offsets_enabled);
+    checkpoint_manager.OnFiltered(cp);
+    checkpoint_manager.FlushFiltered();
+    LOG(INFO) << "Start from master binlog_offset=" << info.filenum << ":" << info.offset;
   }
 
   if (g_conf.filenum == UINT32_MAX) {

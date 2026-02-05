@@ -8,11 +8,14 @@
 #include <chrono>
 #include <ctime>
 #include <fstream>
+#include <type_traits>
+#include <utility>
 
 #include <glog/logging.h>
 
 #include "conf.h"
 #include "event_builder.h"
+#include "event_filter.h"
 #include "net/include/net_cli.h"
 #include "net/include/redis_cli.h"
 #include "pika_binlog_transverter.h"
@@ -45,6 +48,79 @@ std::string BuildDumpPath(const std::string& root, const std::string& db_name) {
 
 }  // namespace
 
+bool PbReplClient::BlockingQueue::Push(BinlogTask&& task) {
+  return PushImpl(std::move(task), &task_queue_);
+}
+
+bool PbReplClient::BlockingQueue::Push(BinlogResult&& result) {
+  return PushImpl(std::move(result), &result_queue_);
+}
+
+bool PbReplClient::BlockingQueue::Pop(BinlogTask* out) {
+  return PopImpl(out, &task_queue_);
+}
+
+bool PbReplClient::BlockingQueue::Pop(BinlogResult* out) {
+  return PopImpl(out, &result_queue_);
+}
+
+bool PbReplClient::BlockingQueue::TryPop(BinlogResult* out) {
+  if (!out) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (result_queue_.empty()) {
+    return false;
+  }
+  *out = std::move(result_queue_.front());
+  result_queue_.pop_front();
+  cv_.notify_all();
+  return true;
+}
+
+void PbReplClient::BlockingQueue::Stop() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  stopped_ = true;
+  cv_.notify_all();
+}
+
+void PbReplClient::BlockingQueue::Reset(size_t capacity) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  capacity_ = capacity;
+  stopped_ = false;
+  task_queue_.clear();
+  result_queue_.clear();
+}
+
+template <typename T>
+bool PbReplClient::BlockingQueue::PushImpl(T&& item, std::deque<T>* queue) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  constexpr bool enforce_capacity = std::is_same<typename std::decay<T>::type, BinlogTask>::value;
+  cv_.wait(lock, [&]() { return stopped_ || !enforce_capacity || queue->size() < capacity_; });
+  if (stopped_) {
+    return false;
+  }
+  queue->push_back(std::move(item));
+  cv_.notify_all();
+  return true;
+}
+
+template <typename T>
+bool PbReplClient::BlockingQueue::PopImpl(T* out, std::deque<T>* queue) {
+  if (!out) {
+    return false;
+  }
+  std::unique_lock<std::mutex> lock(mutex_);
+  cv_.wait(lock, [&]() { return stopped_ || !queue->empty(); });
+  if (queue->empty()) {
+    return false;
+  }
+  *out = std::move(queue->front());
+  queue->pop_front();
+  cv_.notify_all();
+  return true;
+}
+
 PbReplClient::PbReplClient(PikaPort* pika_port) : pika_port_(pika_port) {}
 
 PbReplClient::~PbReplClient() { Stop(); }
@@ -57,12 +133,40 @@ void PbReplClient::Start() {
 void PbReplClient::Stop() {
   should_stop_.store(true);
   StopAckKeepalive();
+  StopWorkers();
   if (repl_cli_) {
     repl_cli_->Close();
   }
   if (thread_.joinable()) {
     thread_.join();
   }
+}
+
+void PbReplClient::StartWorkers() {
+  StopWorkers();
+  size_t workers = g_conf.binlog_workers <= 0 ? 1 : static_cast<size_t>(g_conf.binlog_workers);
+  size_t capacity = g_conf.binlog_queue_size == 0 ? 1024 : g_conf.binlog_queue_size;
+  worker_queue_.reset(new BlockingQueue(capacity));
+  workers_stop_.store(false);
+  worker_threads_.clear();
+  worker_threads_.reserve(workers);
+  for (size_t i = 0; i < workers; ++i) {
+    worker_threads_.emplace_back(&PbReplClient::WorkerLoop, this);
+  }
+}
+
+void PbReplClient::StopWorkers() {
+  workers_stop_.store(true);
+  if (worker_queue_) {
+    worker_queue_->Stop();
+  }
+  for (auto& thread : worker_threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+  worker_threads_.clear();
+  worker_queue_.reset();
 }
 
 bool PbReplClient::ResolveLocalIp(std::string* local_ip) {
@@ -287,6 +391,151 @@ bool PbReplClient::GetProcessedOffset(Offset* out) {
   return true;
 }
 
+void PbReplClient::WorkerLoop() {
+  while (!workers_stop_.load()) {
+    BinlogTask task;
+    if (!worker_queue_ || !worker_queue_->Pop(&task)) {
+      if (workers_stop_.load()) {
+        break;
+      }
+      continue;
+    }
+
+    BinlogResult result;
+    result.seq = task.seq;
+    result.ack_offset = task.ack_offset;
+    result.ackable = true;
+
+    BinlogItem binlog_item;
+    if (!PikaBinlogTransverter::BinlogDecode(TypeFirst, task.binlog, &binlog_item)) {
+      LOG(WARNING) << "pb repl: binlog decode failed";
+      if (worker_queue_) {
+        worker_queue_->Push(std::move(result));
+      }
+      continue;
+    }
+
+    net::RedisCmdArgsType argv;
+    if (ParseRedisRESPArray(binlog_item.content(), &argv) != kRespOk) {
+      LOG(WARNING) << "pb repl: parse redis resp failed";
+      if (worker_queue_) {
+        worker_queue_->Push(std::move(result));
+      }
+      continue;
+    }
+
+    if (argv.empty()) {
+      if (worker_queue_) {
+        worker_queue_->Push(std::move(result));
+      }
+      continue;
+    }
+
+    std::string key;
+    if (argv.size() > 1) {
+      key = argv[1];
+    }
+    std::string command = binlog_item.content();
+    if (argv[0] == "pksetexat" && argv.size() > 2) {
+      std::string temp = argv[2];
+      unsigned long int sec = time(nullptr);
+      unsigned long int tot = std::stol(temp) - sec;
+      std::string time_out = std::to_string(tot);
+      command.erase(0, 4);
+      command.replace(0, 13, "*4\r\n$5\r\nsetex");
+      int start = 13 + 3 + static_cast<int>(std::to_string(key.size()).size()) + 2 + static_cast<int>(key.size()) + 3;
+      int old_time_size = static_cast<int>(std::to_string(temp.size()).size() + 2 + temp.size());
+      int new_time_size = static_cast<int>(std::to_string(time_out.size()).size() + 2 + time_out.size());
+      int diff = old_time_size - new_time_size;
+      command.erase(start, diff);
+      std::string time_cmd = std::to_string(time_out.size()) + "\r\n" + time_out;
+      command.replace(start, new_time_size, time_cmd);
+    }
+
+    std::string data_type = CommandDataType(argv[0]);
+    bool should_send = true;
+    const EventFilter* filter = g_conf.event_filter.get();
+    if (filter) {
+      should_send = filter->ShouldSend(key, data_type, argv[0]);
+    }
+
+    Checkpoint checkpoint;
+    checkpoint.filenum = binlog_item.filenum();
+    checkpoint.offset = binlog_item.offset();
+    checkpoint.logic_id = binlog_item.logic_id();
+    checkpoint.server_id = 0;
+    checkpoint.term_id = binlog_item.term_id();
+    checkpoint.ts_ms = static_cast<uint64_t>(binlog_item.exec_time()) * 1000;
+
+    if (!should_send) {
+      result.advance_checkpoint = true;
+      result.checkpoint = checkpoint;
+      if (worker_queue_) {
+        worker_queue_->Push(std::move(result));
+      }
+      continue;
+    }
+
+    std::string payload = BuildBinlogEventJson(argv, binlog_item, g_conf.db_name, data_type, g_conf.source_id,
+                                               command, key);
+    KafkaRecord record;
+    record.topic = pika_port_->SelectTopicForEvent("binlog");
+    record.key = BuildPartitionKey(g_conf.db_name, data_type, key);
+    record.payload = std::move(payload);
+    record.has_checkpoint = true;
+    record.checkpoint = checkpoint;
+
+    result.send_to_kafka = true;
+    result.record = std::move(record);
+    if (worker_queue_) {
+      worker_queue_->Push(std::move(result));
+    }
+  }
+}
+
+void PbReplClient::DrainResults(std::map<uint64_t, BinlogResult>* pending_results,
+                                uint64_t* next_seq,
+                                const Offset& last_sent_ack,
+                                bool* has_pending_ack,
+                                Offset* pending_ack_start) {
+  if (!worker_queue_ || !pending_results || !next_seq) {
+    return;
+  }
+  BinlogResult result;
+  while (worker_queue_->TryPop(&result)) {
+    (*pending_results)[result.seq] = std::move(result);
+  }
+
+  while (true) {
+    auto it = pending_results->find(*next_seq);
+    if (it == pending_results->end()) {
+      break;
+    }
+    BinlogResult ready = std::move(it->second);
+    pending_results->erase(it);
+    if (ready.send_to_kafka) {
+      int ret = pika_port_->EnqueueKafkaRecord(std::move(ready.record));
+      if (ret != 0) {
+        LOG(WARNING) << "pb repl: enqueue kafka record failed";
+        ready.ackable = false;
+      }
+    } else if (ready.advance_checkpoint) {
+      if (auto* checkpoint_manager = pika_port_->checkpoint_manager(); checkpoint_manager) {
+        checkpoint_manager->OnFiltered(ready.checkpoint);
+      }
+    }
+    if (ready.ackable) {
+      UpdateProcessedOffset(ready.ack_offset);
+      if (has_pending_ack && pending_ack_start && !*has_pending_ack &&
+          OffsetNewer(ready.ack_offset, last_sent_ack)) {
+        *pending_ack_start = ready.ack_offset;
+        *has_pending_ack = true;
+      }
+    }
+    (*next_seq)++;
+  }
+}
+
 bool PbReplClient::LoadBgsaveInfo(Offset* offset) {
   std::string info_path = BuildDumpPath(g_conf.dump_path, g_conf.db_name);
   if (info_path.back() != '/') {
@@ -391,6 +640,10 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
   }
   UpdateProcessedOffset(start_offset);
   StartAckKeepalive(session_id, start_offset);
+  StartWorkers();
+  uint64_t next_seq = 0;
+  uint64_t seq_counter = 0;
+  std::map<uint64_t, BinlogResult> pending_results;
 
   while (!should_stop_.load()) {
     InnerMessage::InnerResponse response;
@@ -402,15 +655,13 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
       } else {
         LOG(WARNING) << "pb repl: binlog recv failed " << s.ToString();
         StopAckKeepalive();
+        StopWorkers();
         return false;
       }
     } else {
       if (response.type() == InnerMessage::kBinlogSync) {
         bool matched_session = false;
         bool logged_mismatch = false;
-        Offset batch_start;
-        Offset batch_end;
-        bool has_batch_end = false;
         for (int i = 0; i < response.binlog_sync_size(); ++i) {
           const auto& binlog_res = response.binlog_sync(i);
           if (binlog_res.session_id() != session_id) {
@@ -424,58 +675,16 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
             continue;
           }
           matched_session = true;
-          BinlogItem binlog_item;
-          if (!PikaBinlogTransverter::BinlogDecode(TypeFirst, binlog_res.binlog(), &binlog_item)) {
-            LOG(WARNING) << "pb repl: binlog decode failed";
-            continue;
-          }
-          net::RedisCmdArgsType argv;
-          if (ParseRedisRESPArray(binlog_item.content(), &argv) != kRespOk) {
-            LOG(WARNING) << "pb repl: parse redis resp failed";
-            continue;
-          }
-          if (argv.empty()) {
-            continue;
-          }
-          std::string key;
-          if (argv.size() > 1) {
-            key = argv[1];
-          }
-          std::string command = binlog_item.content();
-          if (argv[0] == "pksetexat" && argv.size() > 2) {
-            std::string temp = argv[2];
-            unsigned long int sec = time(nullptr);
-            unsigned long int tot = std::stol(temp) - sec;
-            std::string time_out = std::to_string(tot);
-            command.erase(0, 4);
-            command.replace(0, 13, "*4\r\n$5\r\nsetex");
-            int start = 13 + 3 + std::to_string(key.size()).size() + 2 + static_cast<int>(key.size()) + 3;
-            int old_time_size = static_cast<int>(std::to_string(temp.size()).size() + 2 + temp.size());
-            int new_time_size = static_cast<int>(std::to_string(time_out.size()).size() + 2 + time_out.size());
-            int diff = old_time_size - new_time_size;
-            command.erase(start, diff);
-            std::string time_cmd = std::to_string(time_out.size()) + "\r\n" + time_out;
-            command.replace(start, new_time_size, time_cmd);
-          }
-          int ret = pika_port_->PublishBinlogEvent(argv, binlog_item, command, key);
-          if (ret != 0) {
-            LOG(WARNING) << "pb repl: publish binlog event failed, ret=" << ret;
-          } else {
-            Offset ack_offset;
-            ack_offset.filenum = binlog_res.binlog_offset().filenum();
-            ack_offset.offset = binlog_res.binlog_offset().offset();
-            if (!has_batch_end) {
-              batch_start = ack_offset;
-            }
-            batch_end = ack_offset;
-            has_batch_end = true;
-          }
-        }
-        if (has_batch_end) {
-          UpdateProcessedOffset(batch_end);
-          if (!has_pending_ack) {
-            pending_ack_start = batch_start;
-            has_pending_ack = true;
+          BinlogTask task;
+          task.seq = seq_counter++;
+          task.ack_offset.filenum = binlog_res.binlog_offset().filenum();
+          task.ack_offset.offset = binlog_res.binlog_offset().offset();
+          task.binlog = binlog_res.binlog();
+          if (!worker_queue_ || !worker_queue_->Push(std::move(task))) {
+            LOG(WARNING) << "pb repl: enqueue binlog task failed";
+            StopAckKeepalive();
+            StopWorkers();
+            return false;
           }
         }
         if (matched_session) {
@@ -487,6 +696,8 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
         last_non_binlog_log = now;
       }
     }
+
+    DrainResults(&pending_results, &next_seq, last_sent_ack, &has_pending_ack, &pending_ack_start);
 
     Offset committed = last_sent_ack;
     Offset processed;
@@ -512,6 +723,7 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
                      << " last_ack=" << last_sent_ack.filenum << ":" << last_sent_ack.offset
                      << " committed=" << committed.filenum << ":" << committed.offset;
         StopAckKeepalive();
+        StopWorkers();
         return false;
       }
     }
@@ -544,6 +756,7 @@ bool PbReplClient::StartBinlogSyncLoop(const Offset& start_offset, int32_t sessi
     }
   }
   StopAckKeepalive();
+  StopWorkers();
   return true;
 }
 

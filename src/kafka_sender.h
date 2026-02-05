@@ -37,7 +37,7 @@ class KafkaSender : public net::Thread {
   KafkaSender(int id, const Conf& conf, CheckpointManager* checkpoint_manager);
   ~KafkaSender() override;
 
-  void Enqueue(const KafkaRecord& record);
+  void Enqueue(KafkaRecord record);
   void Stop();
   int64_t elements() const { return elements_; }
   StatsSnapshot GetStatsSnapshot() const;

@@ -55,6 +55,8 @@ class Conf {
     kafka_message_max_bytes = 1000000;
     kafka_sender_threads = 1;
     kafka_stats_mode = KafkaStatsMode::kAggregated;
+    binlog_workers = 4;
+    binlog_queue_size = 4096;
     pb_ack_delay_warn_ms = 10000;
     pb_idle_timeout_ms = 30000;
     snapshot_oversize_list_tail_max_items = 0;
@@ -63,6 +65,7 @@ class Conf {
     args_encoding = PayloadEncoding::kBase64;
     raw_resp_encoding = PayloadEncoding::kBase64;
     include_raw_resp = true;
+    start_from_master = false;
     event_filter = nullptr;
   }
 
@@ -97,6 +100,8 @@ class Conf {
   int64_t kafka_message_max_bytes;
   int kafka_sender_threads;
   KafkaStatsMode kafka_stats_mode;
+  int binlog_workers;
+  size_t binlog_queue_size;
   int64_t pb_ack_delay_warn_ms;
   int64_t pb_idle_timeout_ms;
   size_t snapshot_oversize_list_tail_max_items;
@@ -105,6 +110,7 @@ class Conf {
   PayloadEncoding args_encoding;
   PayloadEncoding raw_resp_encoding;
   bool include_raw_resp;
+  bool start_from_master;
   std::shared_ptr<const EventFilter> event_filter;
 };
 

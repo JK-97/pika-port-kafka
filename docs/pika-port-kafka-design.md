@@ -190,9 +190,16 @@
 - Kafka ack 后标记为已消费
 - 重启时重放未 ack 的本地 WAL
 
-## 9. 同步流程（改造后）
+## 9. PB Binlog 并行处理
+
+- BinlogSync 收到数据后只做 session 校验与队列入列。
+- Worker pool 并行执行：binlog 解码 → RESP 解析 → 过滤判断 → 事件构建。
+- 处理结果按 seq 有序 drain，保证 ACK 与 checkpoint 推进顺序一致。
+
+## 10. 同步流程（改造后）
 
 1. 进程启动 → 读取 checkpoint
+   - 若配置 `start_from_master=true`，则以 master `INFO replication` 的 `binlog_offset` 覆盖本地 checkpoint
 2. 建立 legacy trysync 或 PB MetaSync/TrySync → 全量或增量
 3. 全量阶段：dump → 解析 → `snapshot topic`
 4. 增量阶段：binlog → 解析 → `binlog topic`

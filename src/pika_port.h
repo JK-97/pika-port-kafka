@@ -73,6 +73,7 @@ class PikaPort {
                          const BinlogItem& item,
                          const std::string& raw_resp,
                          const std::string& key);
+  int EnqueueKafkaRecord(KafkaRecord record);
   std::string SelectTopicForEvent(const std::string& event_type) const;
 
   bool SetMaster(std::string& master_ip, int master_port);

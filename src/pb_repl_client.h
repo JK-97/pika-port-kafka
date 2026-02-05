@@ -3,12 +3,16 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "checkpoint.h"
+#include "kafka_sender.h"
 
 namespace net {
 class NetCli;
@@ -50,6 +54,53 @@ class PbReplClient {
 
   static bool OffsetNewer(const Offset& a, const Offset& b);
 
+  struct BinlogTask {
+    uint64_t seq{0};
+    Offset ack_offset;
+    std::string binlog;
+  };
+
+  struct BinlogResult {
+    uint64_t seq{0};
+    Offset ack_offset;
+    bool ackable{true};
+    bool send_to_kafka{false};
+    bool advance_checkpoint{false};
+    KafkaRecord record;
+    Checkpoint checkpoint;
+  };
+
+  class BlockingQueue {
+   public:
+    explicit BlockingQueue(size_t capacity) : capacity_(capacity) {}
+    bool Push(BinlogTask&& task);
+    bool Push(BinlogResult&& result);
+    bool Pop(BinlogTask* out);
+    bool Pop(BinlogResult* out);
+    bool TryPop(BinlogResult* out);
+    void Stop();
+    void Reset(size_t capacity);
+
+   private:
+    template <typename T>
+    bool PushImpl(T&& item, std::deque<T>* queue);
+    template <typename T>
+    bool PopImpl(T* out, std::deque<T>* queue);
+
+    size_t capacity_{0};
+    bool stopped_{false};
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<BinlogTask> task_queue_;
+    std::deque<BinlogResult> result_queue_;
+  };
+
+  void StartWorkers();
+  void StopWorkers();
+  void WorkerLoop();
+  void DrainResults(std::map<uint64_t, BinlogResult>* pending_results, uint64_t* next_seq,
+                    const Offset& last_sent_ack, bool* has_pending_ack, Offset* pending_ack_start);
+
  private:
   PikaPort* pika_port_;
   std::atomic<bool> should_stop_{false};
@@ -71,6 +122,10 @@ class PbReplClient {
     Offset last_sent;
   };
   AckState ack_state_;
+
+  std::unique_ptr<BlockingQueue> worker_queue_;
+  std::vector<std::thread> worker_threads_;
+  std::atomic<bool> workers_stop_{false};
 };
 
 #endif  // PB_REPL_CLIENT_H_

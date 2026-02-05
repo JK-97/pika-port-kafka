@@ -8,6 +8,7 @@
 - 可访问的 PikiwiDB master（支持 PB 复制或 legacy trysync/rsync）
 - Kafka 可用，topic 已创建（含 compacted offsets topic）
 - 已编译得到 `pika_port`（见 `docs/build.md`）
+- 配置文件示例见 `docs/pika-port-kafka.conf.example`
 
 ## 2. Topic 规划与模式
 
@@ -27,6 +28,7 @@
 
 必填/关键参数：
 
+- `-C / --config` 配置文件路径（`key=value`，支持 `#`/`;` 注释，配置 < CLI 覆盖）
 - `-i` master IP（默认值见配置）
 - `-o` master 端口（必填）
 - `-k` Kafka brokers（必填）
@@ -61,6 +63,8 @@
 性能/运行：
 
 - `-x` Kafka 发送线程数（默认 `1`）
+- `--binlog_workers` PB binlog 解析/过滤/构建 worker 数（默认 `4`）
+- `--binlog_queue_size` PB binlog worker 队列大小（默认 `4096`）
 - `-G` Heartbeat 中 Kafka sender 统计输出模式（`none|agg|detail|all`，默认 `agg`）
   - `agg` 输出聚合视图，`detail` 输出每个 sender 明细，`all` 同时输出
 - `-b` snapshot 扫描批量（默认 `512`）
@@ -84,12 +88,14 @@
 - `-I` PB 空闲自动重连秒数（默认 `30`，最小 `1`，`0` 关闭）
 - `-F` 事件过滤规则组（可重复）
 - `-X` 全局 exclude key 规则（逗号分隔）
+- `--start_from_master` 启动时读取 master `INFO replication` 的 `binlog_offset` 覆盖本地 checkpoint（`true|false`，默认 `false`）
 
 说明：
 
 - `-R auto` 会优先探测 PB 复制端口，失败则回退 legacy。
 - `--snapshot_oversize_*` 选项仅对 snapshot 生效，不影响 binlog。
 - `args/raw_resp` 选择 `none` 编码时将输出原始字符串，可能包含非 UTF-8/二进制数据。
+- `start_from_master=true` 会忽略本地 checkpoint，从 master 当前 `binlog_offset` 开始同步。
 
 ## 4. 事件过滤
 
@@ -107,6 +113,10 @@
 - `-F "key=prod:*;type=list,set;action=rpush"`
 - `-F /path/to/filters.conf`（文件中一行一个规则组，支持空行和 `#` 注释）
 - `-X "tmp:*,bad:*"`（全局 exclude）
+- 配置文件：
+  - `filter=key=dev:*;type=list;action=rpush`
+  - `exclude=tmp:*,bad:*`
+  - `exclude_keys=secret:*`
 
 key 规则：
 
@@ -159,5 +169,6 @@ type/action 来源：
 - `Trysync success`
 - `Finish to start rsync`
 - Kafka 发送统计信息
+- Heartbeat 日志包含 `master_lag`（来自 master `INFO replication`）
 
 如 master 无法访问本机 rsync / binlog 端口，先检查 `-t` 是否为可达 IP，以及防火墙规则。

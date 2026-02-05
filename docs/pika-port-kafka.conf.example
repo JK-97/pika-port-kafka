@@ -1,0 +1,59 @@
+# pika-port-kafka config example (key=value).
+# Empty lines and lines starting with # or ; are ignored.
+# CLI options override values from this file.
+
+# master / local
+master_ip=127.0.0.1
+master_port=9221
+local_ip=127.0.0.1
+local_port=21333
+passwd=
+db_name=db0
+
+# paths
+log_path=./log/
+dump_path=./rsync_dump/
+checkpoint_path=./checkpoint.json
+
+# kafka
+kafka_brokers=127.0.0.1:9092
+kafka_client_id=pika-port-kafka
+kafka_stream_mode=dual
+kafka_topic_snapshot=pika.snapshot
+kafka_topic_binlog=pika.binlog
+kafka_topic_single=pika.stream
+kafka_topic_offsets=__pika_port_kafka_offsets
+kafka_offsets_enabled=true
+kafka_sender_threads=1
+kafka_stats_mode=agg
+kafka_message_max_bytes=1000000
+kafka_enable_idempotence=true
+
+# sync
+sync_protocol=auto
+sync_batch_num=512
+wait_bgsave_timeout=1800
+heartbeat_interval=60
+pb_ack_delay_warn=10
+pb_idle_timeout=30
+start_from_master=false
+
+# pb binlog parallelism
+binlog_workers=4
+binlog_queue_size=4096
+
+# snapshot oversize controls
+snapshot_oversize_list_tail_max_items=0
+snapshot_oversize_shrink_batch=true
+snapshot_oversize_string_policy=skip
+
+# payload encoding
+args_encoding=base64
+raw_resp_encoding=base64
+include_raw_resp=true
+
+# filters (repeatable)
+# filter=key=dev:*;type=list;action=rpush
+# filter=/path/to/filters.conf
+# exclude=tmp:*,bad:*
+# exclude_keys=secret:*

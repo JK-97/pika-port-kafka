@@ -47,10 +47,10 @@ KafkaSender::StatsSnapshot KafkaSender::GetStatsSnapshot() const {
   return snapshot;
 }
 
-void KafkaSender::Enqueue(const KafkaRecord& record) {
+void KafkaSender::Enqueue(KafkaRecord record) {
   std::unique_lock lock(queue_mutex_);
   if (queue_.size() < 100000) {
-    queue_.push(record);
+    queue_.push(std::move(record));
     queue_size_.fetch_add(1, std::memory_order_relaxed);
     queue_signal_.notify_one();
     return;
@@ -63,7 +63,7 @@ void KafkaSender::Enqueue(const KafkaRecord& record) {
   if (should_exit_) {
     return;
   }
-  queue_.push(record);
+  queue_.push(std::move(record));
   queue_size_.fetch_add(1, std::memory_order_relaxed);
   queue_signal_.notify_one();
 }
