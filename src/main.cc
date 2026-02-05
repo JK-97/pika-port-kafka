@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <random>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <glog/logging.h>
@@ -1252,6 +1253,7 @@ int main(int argc, char* argv[]) {
     checkpoint_manager.OnFiltered(cp);
     checkpoint_manager.FlushFiltered();
     LOG(INFO) << "Start from master binlog_offset=" << info.filenum << ":" << info.offset;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   if (g_conf.filenum == UINT32_MAX) {
