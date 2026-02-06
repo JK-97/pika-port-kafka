@@ -33,6 +33,76 @@ die() {
   exit 1
 }
 
+patch_pikiwidb_cmake() {
+  local cmake_file="$1"
+  [[ -f "$cmake_file" ]] || return 0
+
+  local py="python3"
+  if ! command -v "$py" >/dev/null 2>&1; then
+    py="python"
+  fi
+
+  "$py" - "$cmake_file" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+if "ENABLE_LIBUNWIND" in text or "ENABLE_GPERFTOOLS" in text:
+    sys.exit(0)
+
+changed = False
+
+def replace_once(old, new, label):
+    global text, changed
+    if old not in text:
+        print(f"WARNING: {label} not found in {path}", file=sys.stderr)
+        return False
+    text = text.replace(old, new, 1)
+    changed = True
+    return True
+
+project_match = re.search(r"^project\\(.*\\)\\s*$", text, re.M)
+if not project_match:
+    print(f"WARNING: project() line not found in {path}", file=sys.stderr)
+else:
+    insert = (
+        "option(ENABLE_LIBUNWIND \"Enable libunwind (for glog/gperftools)\" ON)\n"
+        "option(ENABLE_GPERFTOOLS \"Enable gperftools\" ON)\n"
+    )
+    idx = project_match.end()
+    text = text[:idx] + "\n" + insert + text[idx:]
+    changed = True
+
+replace_once(
+    "if(CMAKE_SYSTEM_NAME MATCHES \"Linux\")\n  ExternalProject_Add(unwind",
+    "if(CMAKE_SYSTEM_NAME MATCHES \"Linux\" AND ENABLE_LIBUNWIND)\n  ExternalProject_Add(unwind",
+    "unwind ExternalProject_Add guard",
+)
+replace_once(
+    "else()\n  set(LIBUNWIND_ON OFF)\nendif()",
+    "else()\n  set(LIBUNWIND_ON OFF)\n  set(LIBUNWIND_NAME \"\")\nendif()",
+    "LIBUNWIND_ON else block",
+)
+replace_once(
+    "if(CMAKE_SYSTEM_NAME MATCHES \"Linux\")\n  ExternalProject_Add(gperftools",
+    "if(CMAKE_SYSTEM_NAME MATCHES \"Linux\" AND ENABLE_GPERFTOOLS)\n  ExternalProject_Add(gperftools",
+    "gperftools ExternalProject_Add guard",
+)
+replace_once(
+    "  set(LIBGPERF_NAME gperftools)\nendif()",
+    "  set(LIBGPERF_NAME gperftools)\nelse()\n  set(LIBGPERF_NAME \"\")\nendif()",
+    "LIBGPERF_NAME else block",
+)
+
+if changed:
+    path.write_text(text)
+PY
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -50,8 +120,8 @@ SRC_DIR="${REPO_ROOT}/src"
 JOBS=""
 CLONE=0
 CLEAN=0
-ENABLE_LIBUNWIND=0
-ENABLE_GPERFTOOLS=0
+ENABLE_LIBUNWIND=-1
+ENABLE_GPERFTOOLS=-1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -111,9 +181,25 @@ if [[ -z "$JOBS" ]]; then
   fi
 fi
 
+if [[ "$ENABLE_LIBUNWIND" -lt 0 || "$ENABLE_GPERFTOOLS" -lt 0 ]]; then
+  HOST_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+  case "$HOST_ARCH" in
+    aarch64|arm64)
+      [[ "$ENABLE_LIBUNWIND" -lt 0 ]] && ENABLE_LIBUNWIND=0
+      [[ "$ENABLE_GPERFTOOLS" -lt 0 ]] && ENABLE_GPERFTOOLS=0
+      ;;
+    *)
+      [[ "$ENABLE_LIBUNWIND" -lt 0 ]] && ENABLE_LIBUNWIND=1
+      [[ "$ENABLE_GPERFTOOLS" -lt 0 ]] && ENABLE_GPERFTOOLS=1
+      ;;
+  esac
+fi
+
 if [[ "$CLEAN" -eq 1 ]]; then
   rm -rf "$PIKIWIDB_BUILD" "$BUILD_DIR"
 fi
+
+patch_pikiwidb_cmake "${PIKIWIDB_ROOT}/CMakeLists.txt"
 
 cmake_args=(
   -S "$PIKIWIDB_ROOT"

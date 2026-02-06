@@ -103,7 +103,8 @@ cmake -S . -B build -DUSE_PIKA_TOOLS=OFF -DWITH_COMMAND_DOCS=OFF \
 ./scripts/build.sh --help
 ```
 
-默认情况下脚本会禁用 `libunwind` 和 `gperftools`（可用 `--enable-libunwind` / `--enable-gperftools` 开启）。
+默认情况下脚本会在 aarch64 上禁用 `libunwind` 和 `gperftools`（可用 `--enable-libunwind` / `--enable-gperftools` 开启），
+在 amd64 上保持默认开启。
 protobuf 默认使用 PikiwiDB deps 目录下的 `libprotobuf.a` 与 `protoc`，也可通过
 `--protobuf-lib` / `--protobuf-protoc` 覆盖。
 
@@ -143,3 +144,5 @@ ldconfig -p | rg libbz2
 - `undefined reference` to fmt/jemalloc/rocksdb：确认 CMake 参数中的 `*_LIBRARY` 指向真实文件。
 - `undefined reference` to `_Ux86_64_getcontext` / `_ULx86_64_*`：安装 `libunwind-dev` 并清理构建缓存，
   或显式传入 `--unwind-lib` / `--unwind-x86-64-lib`。
+- AArch64 上构建 PikiwiDB 3.5.6 时 `libunwind` 可能编译失败：使用 `scripts/build_all.sh`（默认禁用
+  `libunwind`/`gperftools`），并建议加 `--clean` 重新生成构建目录。
